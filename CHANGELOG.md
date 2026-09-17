@@ -20,6 +20,12 @@ Each entry follows the format: `- <change-name>: <summary>`.
   `.uf/progress/`. Includes symlink defense, path sanitization, and
   restrictive file permissions (0o600/0o700). (Spec:
   openspec/changes/uf-workflow-checkpoint/)
+- build-from-source: Added "Build from Source" install
+  instructions to README.md and QUICKSTART.md. Documents
+  prerequisites (Go 1.25+, make), clone + install commands
+  (`make install`), and verification (`uf version`).
+  (Spec: openspec/changes/build-from-source/,
+  Fixes: #536)
 
 ### Removed
 
