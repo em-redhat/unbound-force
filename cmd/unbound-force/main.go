@@ -36,7 +36,7 @@ func main() {
 	root.AddCommand(newGateCmd())
 
 	if err := root.Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(gateExitCode(err))
 	}
 }
 
