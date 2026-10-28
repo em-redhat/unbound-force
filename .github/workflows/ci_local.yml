@@ -98,7 +98,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
-    uses: unbound-force/gaze/.github/workflows/reusable_gaze_ai_report.yml@c133b1180f26bf0b2ae433d22f6c7adf9fbff992
+    uses: unbound-force/gaze/.github/workflows/reusable_gaze_ai_report.yml@8bdfb59f8b10de854ba289e5e545d1eb9fee0f56
     with:
       coverage-artifact: coverage-out
       max-crapload: 30
