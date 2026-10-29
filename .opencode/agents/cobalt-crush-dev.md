@@ -123,17 +123,25 @@ Before submitting for review and after receiving review feedback:
 
 ### Addressing Review Findings
 
-1. **Check for artifacts**: Look in `.uf/artifacts/review-verdict/` for Divisor review reports. Also check recent `/uf.review-council` output.
+1. **Check for artifacts**: Look in `.uf/artifacts/review-verdict/` for Divisor review reports. Also check recent `/uf.review-council` output. Treat `review-verdict` as the canonical decision artifact; `review-dispatch` is additive provenance only.
 
-2. **Categorize findings**: Group by persona (Guard, Architect, Adversary, SRE, Testing) and severity (CRITICAL, HIGH, MEDIUM, LOW).
+2. **Validate the version and decision**: Migrated reading supports historical schema version 1 and current schema version 2. Apply the Hero Interface Contract same-major compatibility rule before interpreting the payload. An unmigrated v1-only consumer must reject version 2 rather than guessing at compatibility.
 
-3. **Address in severity order**: Fix CRITICAL and HIGH findings first. These block the merge.
+3. **Apply fail-closed progression semantics**:
+   - `APPROVED` permits automated progression; no review fix is required.
+   - `CHANGES_REQUESTED` blocks automated progression until the findings are addressed and review succeeds.
+   - `ESCALATED` is advisory but blocks automated progression until the existing human gate resolves it.
+   - `INCONCLUSIVE` and `UNAVAILABLE` are not approvals. Both block automated progression until a successful rerun or explicit human resolution.
 
-4. **Learn from patterns**: Read past review findings. If The Architect frequently requests "add GoDoc to exported function," proactively include GoDoc on all new exported functions. If The Adversary frequently flags "missing error handling," add error handling proactively. This pattern recognition prevents recurring review cycles.
+4. **Categorize findings**: Group by persona (Guard, Architect, Adversary, SRE, Testing) and severity (CRITICAL, HIGH, MEDIUM, LOW).
 
-5. **Re-validate after fixes**: After addressing findings, re-run Gaze validation (if available) to verify no regressions before re-submitting.
+5. **Address in severity order**: Fix CRITICAL and HIGH findings first. These block the merge.
 
-6. **No Divisor available**: If The Divisor is not installed, note this: "Automated review is not available — The Divisor is not installed. Recommend running `uf init --divisor` to deploy the review council." Proceed with implementation using pre-review self-checks.
+6. **Learn from patterns**: Read past review findings. If The Architect frequently requests "add GoDoc to exported function," proactively include GoDoc on all new exported functions. If The Adversary frequently flags "missing error handling," add error handling proactively. This pattern recognition prevents recurring review cycles.
+
+7. **Re-validate after fixes**: After addressing findings, re-run Gaze validation (if available) to verify no regressions before re-submitting.
+
+8. **No Divisor available**: If The Divisor is not installed, note this: "Automated review is not available — The Divisor is not installed. Recommend running `uf init --divisor` to deploy the review council." Proceed with implementation using pre-review self-checks.
 
 ## Speckit Integration
 
@@ -161,19 +169,19 @@ If a task depends on another task that is not yet complete:
 ## Swarm Coordination
 
 When operating as a Swarm worker (spawned via
-`swarm_spawn_subtask()`), follow this protocol:
+`forge_spawn_subtask()`), follow this protocol:
 
 ### File Reservation Protocol
-Before editing any file, MUST call `swarmmail_reserve()`
+Before editing any file, MUST call `comms_reserve()`
 with the file paths you intend to modify. This prevents
 conflicts with parallel workers:
 ```
-swarmmail_reserve({ paths: ["internal/doctor/checks.go"], reason: "Implementing Ollama check" })
+comms_reserve({ paths: ["internal/doctor/checks.go"], reason: "Implementing Ollama check" })
 ```
 
 ### Session Lifecycle
 Every session MUST end with:
-1. Call `swarm_complete()` with `files_touched` listing all
+1. Call `forge_complete()` with `files_touched` listing all
    modified files
 2. Call `hive_sync()` to persist work items to git
 3. Verify `git push` succeeds
@@ -181,11 +189,11 @@ Every session MUST end with:
 **The plane is not landed until `git push` succeeds.**
 
 ### Progress Reporting
-SHOULD call `swarm_progress()` at milestones (25%, 50%,
+SHOULD call `forge_progress()` at milestones (25%, 50%,
 75% completion) so the coordinator can track status.
 
 ### When NOT Operating Under Swarm
-If you are invoked directly (not via `swarm_spawn_subtask`),
+If you are invoked directly (not via `forge_spawn_subtask`),
 ignore this section. These protocols only apply when
 Swarm is coordinating parallel workers.
 
@@ -206,13 +214,12 @@ learning storage and retrieval).
    about the files you will modify. Example queries:
    - "scaffold.go patterns and edge cases"
    - "doctor checks.go implementation decisions"
-   - "orchestration workflow state management"
+   - "sandbox session lifecycle management"
 
 2. **Related specs governing the feature**: Query
    `dewey_search` for spec references that constrain
    the implementation. Example queries:
    - "FR-001 implementation requirements"
-   - "spec 008 workflow stages"
    - "constitution testability principle"
 
 3. **Architectural patterns from conventions**: Query

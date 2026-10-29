@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,6 +36,55 @@ func findProjectRoot(t *testing.T) string {
 		}
 		dir = parent
 	}
+}
+
+func runScaffoldWithoutExternalTools(t *testing.T, opts Options) (*Result, error) {
+	t.Helper()
+	if opts.LookPath == nil {
+		opts.LookPath = stubScaffoldLookPath(nil)
+	}
+	if opts.ExecCmdInDir == nil {
+		opts.ExecCmdInDir = func(dir, name string, args ...string) ([]byte, error) {
+			t.Fatalf("unexpected external command in %s: %s %v", dir, name, args)
+			return nil, nil
+		}
+	}
+	return Run(opts)
+}
+
+func readJSONFile(t *testing.T, path string, target any) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read JSON file %s: %v", path, err)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		t.Fatalf("parse JSON file %s: %v", path, err)
+	}
+}
+
+func assertStringMap(t *testing.T, label string, got, want map[string]string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Errorf("%s has %d entries, want %d: %v", label, len(got), len(want), got)
+	}
+	for name, wantValue := range want {
+		if gotValue := got[name]; gotValue != wantValue {
+			t.Errorf("%s[%q] = %q, want %q", label, name, gotValue, wantValue)
+		}
+	}
+}
+
+type packageLockEntry struct {
+	Version         string            `json:"version"`
+	Resolved        string            `json:"resolved"`
+	Integrity       string            `json:"integrity"`
+	License         string            `json:"license"`
+	Dev             bool              `json:"dev"`
+	Dependencies    map[string]string `json:"dependencies"`
+	DevDependencies map[string]string `json:"devDependencies"`
 }
 
 // TestEmbeddedAssetsMatchSource verifies that every file under
@@ -68,6 +119,19 @@ func TestEmbeddedAssets_MatchSource(t *testing.T) {
 		if strings.HasPrefix(relPath, "specify/") {
 			continue
 		}
+		// The live meta-repository declaration intentionally contains active
+		// organization siblings. Generated projects receive the empty template.
+		if relPath == "uf/sibling-repos.yaml" {
+			continue
+		}
+		// Custom packs (*-custom.md) are user-owned: uf init seeds the
+		// embedded copy on first run and never overwrites the canonical
+		// file thereafter. The embedded copies are initial deployment
+		// templates — the canonical repo copies MAY legitimately diverge.
+		if strings.HasPrefix(relPath, "opencode/uf/packs/") &&
+			strings.HasSuffix(relPath, "-custom.md") {
+			continue
+		}
 
 		// Map asset path to canonical source path
 		srcRel := mapAssetToSource(relPath)
@@ -90,6 +154,1654 @@ func TestEmbeddedAssets_MatchSource(t *testing.T) {
 				"Run: cp %s internal/scaffold/assets/%s",
 				relPath, srcRel, srcRel, relPath)
 		}
+	}
+}
+
+// TestSpecReviewPerFindingGateContracts pins the structural
+// contract of the per-finding spec review decision gate across
+// the two command assets and the severity pack.
+func TestSpecReviewPerFindingGateContracts(t *testing.T) {
+	unleashContent, err := assetContent("opencode/commands/uf.unleash.md")
+	if err != nil {
+		t.Fatalf("read embedded unleash command: %v", err)
+	}
+	unleash := string(unleashContent)
+
+	councilContent, err := assetContent("opencode/commands/uf.review-council.md")
+	if err != nil {
+		t.Fatalf("read embedded review-council command: %v", err)
+	}
+	council := string(councilContent)
+
+	optionLabels := []string{
+		`"Apply suggested fix"`,
+		`"Override & continue"`,
+		`"Show more context"`,
+		`"Pause & exit"`,
+		`"Apply all remaining LOW/MEDIUM fixes"`,
+	}
+
+	t.Run("option labels present in both command assets", func(t *testing.T) {
+		for _, label := range optionLabels {
+			if !strings.Contains(unleash, label) {
+				t.Errorf("unleash command missing option label %s", label)
+			}
+			if !strings.Contains(council, label) {
+				t.Errorf("review-council command missing option label %s", label)
+			}
+		}
+	})
+
+	t.Run("mandatory gate markers retained", func(t *testing.T) {
+		if !strings.Contains(council, ">>> MANDATORY GATE: HUMAN CONFIRMATION REQUIRED <<<") {
+			t.Error("review-council command missing MANDATORY GATE marker")
+		}
+		if !strings.Contains(council, ">>> END MANDATORY GATE <<<") {
+			t.Error("review-council command missing END MANDATORY GATE marker")
+		}
+	})
+
+	t.Run("severity-order presentation", func(t *testing.T) {
+		if !strings.Contains(unleash, "severity order (CRITICAL, HIGH, MEDIUM, LOW)") {
+			t.Error("unleash command missing severity-order presentation")
+		}
+		if !strings.Contains(council, "severity order (CRITICAL, HIGH, MEDIUM, LOW)") {
+			t.Error("review-council command missing severity-order presentation")
+		}
+	})
+
+	t.Run("no autonomous progression past high/critical", func(t *testing.T) {
+		if !strings.Contains(unleash, "MUST NOT proceed past it: no autonomous fix") {
+			t.Error("unleash command missing no-autonomous-progression rule")
+		}
+		if !strings.Contains(council, "MUST NOT proceed past a HIGH/CRITICAL finding without") {
+			t.Error("review-council command missing no-autonomous-progression rule")
+		}
+	})
+
+	t.Run("severity pack note present", func(t *testing.T) {
+		packContent, err := assetContent("opencode/uf/packs/severity.md")
+		if err != nil {
+			t.Fatalf("read embedded severity pack: %v", err)
+		}
+		if !strings.Contains(string(packContent), "Human-directed fixes vs autonomous auto-fixes") {
+			t.Error("severity pack missing human-directed vs autonomous auto-fix note")
+		}
+	})
+
+	t.Run("no stale bulk-gate option labels", func(t *testing.T) {
+		stale := []string{
+			`"Apply auto-fixes"`,
+			`"Review findings first"`,
+			`"Skip auto-fixes -- report only"`,
+		}
+		for _, label := range stale {
+			if strings.Contains(unleash, label) {
+				t.Errorf("unleash command retains stale option label %s", label)
+			}
+			if strings.Contains(council, label) {
+				t.Errorf("review-council command retains stale option label %s", label)
+			}
+		}
+	})
+
+	t.Run("override recording contract pinned", func(t *testing.T) {
+		if !strings.Contains(unleash, `"overrides": [...]`) {
+			t.Error("unleash command missing overrides checkpoint payload")
+		}
+		if !strings.Contains(council, `step: "spec-review-fix-loop"`) {
+			t.Error("review-council command missing spec-review-fix-loop checkpoint marker")
+		}
+		if !strings.Contains(council, "An override without a recorded justification is") {
+			t.Error("review-council command missing override-justification requirement")
+		}
+	})
+
+	t.Run("session-resume guard pinned", func(t *testing.T) {
+		if !strings.Contains(unleash, "checkpoint data stand") {
+			t.Error("unleash command missing durable-resolution-stands rule")
+		}
+		if !strings.Contains(council, "context compression or session resume are NOT valid") {
+			t.Error("review-council command missing session-resume guard rule")
+		}
+	})
+
+	t.Run("recommended-option labeling pinned", func(t *testing.T) {
+		if !strings.Contains(unleash, `labeled "(Recommended)"`) {
+			t.Error("unleash command missing recommended-option labeling")
+		}
+		if !strings.Contains(council, `labeled "(Recommended)"`) {
+			t.Error("review-council command missing recommended-option labeling")
+		}
+	})
+
+	t.Run("autonomous auto-fix boundary pinned", func(t *testing.T) {
+		if !strings.Contains(council, "remains LOW/MEDIUM only") {
+			t.Error("review-council command missing autonomous auto-fix boundary statement")
+		}
+		packContent, err := assetContent("opencode/uf/packs/severity.md")
+		if err != nil {
+			t.Fatalf("read embedded severity pack: %v", err)
+		}
+		pack := string(packContent)
+		for _, row := range []string{"| HIGH | Report only |", "| CRITICAL | Report only |"} {
+			if !strings.Contains(pack, row) {
+				t.Errorf("severity pack missing auto-fix policy row %s", row)
+			}
+		}
+	})
+
+	t.Run("bulk-shortcut severity restriction pinned", func(t *testing.T) {
+		if !strings.Contains(unleash, "MUST NOT appear for HIGH/CRITICAL findings") {
+			t.Error("unleash command missing bulk-shortcut HIGH/CRITICAL restriction")
+		}
+		if !strings.Contains(unleash, "MUST NOT modify any HIGH/CRITICAL finding") {
+			t.Error("unleash command missing bulk-shortcut HIGH/CRITICAL modification ban")
+		}
+		if !strings.Contains(council, "MUST NOT modify any HIGH/CRITICAL finding") {
+			t.Error("review-council command missing bulk-shortcut HIGH/CRITICAL modification ban")
+		}
+	})
+
+	t.Run("override carry-forward matching key pinned", func(t *testing.T) {
+		if !strings.Contains(unleash, "same file and root cause") {
+			t.Error("unleash command missing override carry-forward matching key")
+		}
+		if !strings.Contains(council, "same file and root cause") {
+			t.Error("review-council command missing override carry-forward matching key")
+		}
+	})
+
+	t.Run("override-only outcome labeling pinned", func(t *testing.T) {
+		if !strings.Contains(unleash, "REQUEST CHANGES resolved by recorded overrides") {
+			t.Error("unleash command missing override-only outcome labeling")
+		}
+		if !strings.Contains(council, "REQUEST CHANGES resolved by recorded overrides") {
+			t.Error("review-council command missing override-only outcome labeling")
+		}
+	})
+}
+
+// TestQuestionToolPresentationContractGates pins the question-tool
+// presentation contract across the three mutation-command assets:
+// the shared wrap-safe contract fragments (each once per gate), the
+// per-gate option inventories (FR-007/FR-008/FR-009), the per-gate
+// fragment and gate counts, the backtick-bracket option-array
+// literal counts, the per-label occurrence totals of every
+// FR-007/FR-008/FR-009 inventory label, and the absence of the
+// legacy bare-options phrasing asserted both raw and
+// whitespace-normalized (so line-wrapped occurrences fail).
+func TestQuestionToolPresentationContractGates(t *testing.T) {
+	readAsset := func(name string) string {
+		t.Helper()
+		content, err := assetContent("opencode/commands/" + name)
+		if err != nil {
+			t.Fatalf("read embedded %s command: %v", name, err)
+		}
+		return string(content)
+	}
+
+	triage := readAsset("uf.triage-issue.md")
+	feedback := readAsset("uf.address-feedback.md")
+	review := readAsset("uf.review-pr.md")
+
+	// normalize collapses markdown line wrapping so option labels
+	// split across lines in the source still match their inventory
+	// spelling. Contract fragments are checked raw on purpose:
+	// each fragment MUST sit on a single line (wrap-safe pin).
+	normalize := func(s string) string {
+		return strings.Join(strings.Fields(s), " ")
+	}
+
+	contractFragments := []string{
+		"the question tool MUST present the",
+		"same details and options",
+		"Per-option reasoning: what each choice does and",
+		"when it fits",
+		"advisory only",
+		"the human decides",
+		"recommended option FIRST",
+		`labeled "(Recommended)"`,
+	}
+
+	t.Run("shared contract fragments present in all three command assets", func(t *testing.T) {
+		for _, tc := range []struct {
+			assetName string
+			asset     string
+		}{
+			{"uf.triage-issue", triage},
+			{"uf.address-feedback", feedback},
+			{"uf.review-pr", review},
+		} {
+			for _, fragment := range contractFragments {
+				if !strings.Contains(tc.asset, fragment) {
+					t.Errorf("%s command missing contract fragment %q", tc.assetName, fragment)
+				}
+			}
+		}
+	})
+
+	triageOptions := []string{
+		`"Proceed -- execute triage actions"`,
+		`"Skip -- write artifact only"`,
+		`"Yes -- create and apply label '<label>'"`,
+		`"Yes -- apply label '<label>'"`,
+		`"Yes -- apply duplicate label"`,
+		`"Yes -- post another comment"`,
+		`"No -- skip comment"`,
+		`"Approve -- post as-is"`,
+		`"Modify -- adjust comment text"`,
+		`"Abort -- do not post"`,
+		`"Yes -- create this child issue"`,
+		`"Yes -- create anyway"`,
+		`"No -- skip this child issue"`,
+		`"No -- skip"`,
+	}
+
+	feedbackOptions := []string{
+		`"Accept"`,
+		`"Modify"`,
+		`"Reject"`,
+		`"Ask"`,
+		`"Confirm -- proceed with execution"`,
+		`"Revise -- change decisions"`,
+		`"Proceed with Phase 4 execution"`,
+		`"Review plan again"`,
+		`"Abort -- stop here"`,
+		`"Rebase onto remote and push"`,
+		`"Abort -- preserve local commits"`,
+		`"Yes -- post reply comments"`,
+		`"No -- skip posting"`,
+		`"Yes -- resolve accepted threads"`,
+		`"No -- leave threads open"`,
+	}
+
+	reviewOptions := []string{
+		`"Wait for checks to complete"`,
+		`"Proceed with available results"`,
+		`"Review all files"`,
+		`"Focus on specific files"`,
+		`"Yes -- create fix branch"`,
+		`"No -- skip"`,
+		`"Commit -- apply fix"`,
+		`"Edit commit message"`,
+		`"Abort -- discard changes"`,
+		`"Yes -- post as GitHub review"`,
+		`"No -- terminal summary is sufficient"`,
+		`"Yes -- post new review"`,
+		`"No -- skip posting"`,
+		`"Yes -- override with <new_verdict>"`,
+		`"No -- keep existing <old_verdict>"`,
+		`"Approve -- post review"`,
+		`"Yes -- post review"`,
+		`"Edit comments first"`,
+		`"Change verdict"`,
+	}
+
+	// Per-label occurrence totals, computed empirically against
+	// the embedded assets. The quoted-label form anchors each
+	// count so prefix labels cannot collide with longer labels.
+	triageLabelCounts := map[string]int{
+		`"Proceed -- execute triage actions"`:       2,
+		`"Skip -- write artifact only"`:             2,
+		`"Yes -- create and apply label '<label>'"`: 2,
+		`"Yes -- apply label '<label>'"`:            2,
+		`"Yes -- apply duplicate label"`:            2,
+		`"Yes -- post another comment"`:             2,
+		`"No -- skip comment"`:                      4,
+		`"Approve -- post as-is"`:                   3,
+		`"Modify -- adjust comment text"`:           2,
+		`"Abort -- do not post"`:                    2,
+		`"Yes -- create this child issue"`:          2,
+		`"Yes -- create anyway"`:                    2,
+		`"No -- skip this child issue"`:             2,
+		`"No -- skip"`:                              10,
+	}
+
+	feedbackLabelCounts := map[string]int{
+		`"Accept"`:                            3,
+		`"Modify"`:                            2,
+		`"Reject"`:                            2,
+		`"Ask"`:                               2,
+		`"Confirm -- proceed with execution"`: 2,
+		`"Revise -- change decisions"`:        2,
+		`"Proceed with Phase 4 execution"`:    3,
+		`"Review plan again"`:                 3,
+		`"Abort -- stop here"`:                2,
+		`"Rebase onto remote and push"`:       2,
+		`"Abort -- preserve local commits"`:   2,
+		`"Yes -- post reply comments"`:        2,
+		`"No -- skip posting"`:                2,
+		`"Yes -- resolve accepted threads"`:   2,
+		`"No -- leave threads open"`:          2,
+	}
+
+	reviewLabelCounts := map[string]int{
+		`"Wait for checks to complete"`:          2,
+		`"Proceed with available results"`:       2,
+		`"Review all files"`:                     3,
+		`"Focus on specific files"`:              3,
+		`"Yes -- create fix branch"`:             3,
+		`"No -- skip"`:                           2,
+		`"Commit -- apply fix"`:                  3,
+		`"Edit commit message"`:                  2,
+		`"Abort -- discard changes"`:             2,
+		`"Yes -- post as GitHub review"`:         3,
+		`"No -- terminal summary is sufficient"`: 2,
+		`"Yes -- post new review"`:               2,
+		`"No -- skip posting"`:                   6,
+		`"Yes -- override with <new_verdict>"`:   2,
+		`"No -- keep existing <old_verdict>"`:    2,
+		`"Approve -- post review"`:               2,
+		`"Yes -- post review"`:                   2,
+		`"Edit comments first"`:                  3,
+		`"Change verdict"`:                       3,
+	}
+
+	t.Run("gate option inventories present in their command assets", func(t *testing.T) {
+		for _, tc := range []struct {
+			assetName string
+			asset     string
+			labels    []string
+		}{
+			{"uf.triage-issue", triage, triageOptions},
+			{"uf.address-feedback", feedback, feedbackOptions},
+			{"uf.review-pr", review, reviewOptions},
+		} {
+			normalized := normalize(tc.asset)
+			for _, label := range tc.labels {
+				if !strings.Contains(normalized, normalize(label)) {
+					t.Errorf("%s command missing option label %s", tc.assetName, label)
+				}
+			}
+		}
+	})
+
+	t.Run("per-gate contract fragment counts", func(t *testing.T) {
+		for _, tc := range []struct {
+			assetName string
+			asset     string
+			want      int
+		}{
+			{"uf.triage-issue", triage, 8},
+			{"uf.address-feedback", feedback, 6},
+			{"uf.review-pr", review, 8},
+		} {
+			for _, fragment := range contractFragments {
+				if got := strings.Count(tc.asset, fragment); got != tc.want {
+					t.Errorf("%s command carries %d occurrences of contract fragment %q, want %d (one per gate)", tc.assetName, got, fragment, tc.want)
+				}
+			}
+		}
+	})
+
+	t.Run("option-array literal counts", func(t *testing.T) {
+		// The backtick-bracket opener counts one per house-style
+		// option array; embedded JSON examples (no backtick) are
+		// excluded. review-pr records 9, not 8, because Step 8c
+		// carries two verdict-specific option sets.
+		for _, tc := range []struct {
+			assetName string
+			asset     string
+			want      int
+		}{
+			{"uf.triage-issue", triage, 8},
+			{"uf.address-feedback", feedback, 6},
+			{"uf.review-pr", review, 9},
+		} {
+			if got := strings.Count(tc.asset, "`[\""); got != tc.want {
+				t.Errorf("%s command carries %d backtick-bracket option arrays, want %d", tc.assetName, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("legacy bare-options phrasing absent", func(t *testing.T) {
+		legacy := "Use the **question tool** with options"
+		for _, tc := range []struct {
+			assetName string
+			asset     string
+		}{
+			{"uf.triage-issue", triage},
+			{"uf.address-feedback", feedback},
+			{"uf.review-pr", review},
+		} {
+			if strings.Contains(tc.asset, legacy) {
+				t.Errorf("%s command retains legacy bare-options phrasing %q", tc.assetName, legacy)
+			}
+			if strings.Contains(normalize(tc.asset), normalize(legacy)) {
+				t.Errorf("%s command retains legacy bare-options phrasing %q across wrapped lines", tc.assetName, legacy)
+			}
+		}
+	})
+
+	t.Run("per-label occurrence totals", func(t *testing.T) {
+		// Every inventory label's quoted form is counted in the
+		// whitespace-normalized asset; the closing quote anchors
+		// the match so a prefix label ("No -- skip") cannot
+		// collide with a longer label ("No -- skip posting").
+		// Totals were computed empirically against the assets;
+		// each occurrence is an option-array entry, a per-option
+		// reasoning bullet, a recommendation, or follow-up prose,
+		// so removing a label from any array fails the pin.
+		for _, tc := range []struct {
+			assetName string
+			asset     string
+			labels    []string
+			wants     map[string]int
+		}{
+			{"uf.triage-issue", triage, triageOptions, triageLabelCounts},
+			{"uf.address-feedback", feedback, feedbackOptions, feedbackLabelCounts},
+			{"uf.review-pr", review, reviewOptions, reviewLabelCounts},
+		} {
+			normalized := normalize(tc.asset)
+			for _, label := range tc.labels {
+				if got := strings.Count(normalized, normalize(label)); got != tc.wants[label] {
+					t.Errorf("%s command carries %d occurrences of option label %s, want %d", tc.assetName, got, label, tc.wants[label])
+				}
+			}
+		}
+	})
+}
+
+func TestUnleashCommand_ToolRoutingContracts(t *testing.T) {
+	content, err := assetContent("opencode/commands/uf.unleash.md")
+	if err != nil {
+		t.Fatalf("read embedded unleash command: %v", err)
+	}
+
+	command := string(content)
+	between := func(t *testing.T, value, start, end string) string {
+		t.Helper()
+		startIndex := strings.Index(value, start)
+		if startIndex == -1 {
+			t.Fatalf("unleash command missing section start %q", start)
+		}
+		value = value[startIndex:]
+		endIndex := strings.Index(value, end)
+		if endIndex == -1 {
+			t.Fatalf("unleash command missing section end %q", end)
+		}
+		return value[:endIndex]
+	}
+
+	specReviewExit := between(t, command, `- If the human chooses "Pause & exit"`, "Rendered shape:")
+	demoNextSteps := between(t, command, "4. **Next Steps**:", "Then persist the summary")
+	stepTenPersistence := between(t, command, "Then persist the summary", "## Guardrails")
+
+	// Step-heading-anchored spans for the seam pins below. Each
+	// span covers one pipeline step (or one review-dispatch
+	// sequence) so every pin proves the tool is invoked by its
+	// consuming step, not merely mentioned elsewhere in the
+	// command.
+	progressTracking := between(t, command, "### TodoWrite Progress Tracking", "### 0. Startup Cleanup")
+	startupCleanup := between(t, command, "### 0. Startup Cleanup", "### 1. Branch Safety Gate")
+	branchGateStep := between(t, command, "### 1. Branch Safety Gate", "### 2. Resumability Detection")
+	resumeDetection := between(t, command, "### 2. Resumability Detection", "### 3. Step 1 -- Clarify")
+	clarifyStep := between(t, command, "### 3. Step 1 -- Clarify", "### 4. Step 2 -- Plan")
+	specReviewDispatch := between(t, command, "### 6. Step 4 -- Spec Review", "**Processing results**")
+	implementExecution := between(t, command, "### 7. Step 5 -- Implement", "### 8. Step 6 -- Code Review")
+	codeReviewDispatch := between(t, command, "### 8. Step 6 -- Code Review", "**Processing results**")
+	codeReviewStep := between(t, command, "### 8. Step 6 -- Code Review", "### 9. Step 7 -- Retrospective")
+	retrospectiveStep := between(t, command, "### 9. Step 7 -- Retrospective", "### 10. Step 8 -- Demo")
+	demoCompletion := between(t, command, "### 10. Step 8 -- Demo", "## Guardrails")
+
+	t.Run("spec review exit routes through format_unleash_exit", func(t *testing.T) {
+		if !strings.Contains(specReviewExit, "format_unleash_exit") {
+			t.Error("spec review exit missing format_unleash_exit call")
+		}
+		if !strings.Contains(specReviewExit, `variant: "spec-review"`) {
+			t.Error("spec review exit missing spec-review variant")
+		}
+		if !strings.Contains(specReviewExit, "tier: WORKFLOW_TIER") {
+			t.Error("spec review exit does not pass tier to the formatter tool")
+		}
+		if !strings.Contains(specReviewExit, "The tool selects the tier-specific recovery guidance") {
+			t.Error("spec review exit missing tool-selected tier guidance note")
+		}
+	})
+
+	t.Run("demo routes through format_unleash_demo", func(t *testing.T) {
+		if !strings.Contains(demoNextSteps, "format_unleash_demo") {
+			t.Error("demo missing format_unleash_demo call")
+		}
+		if !strings.Contains(demoNextSteps, "tier: WORKFLOW_TIER") {
+			t.Error("demo does not pass tier to the formatter tool")
+		}
+		if !strings.Contains(demoNextSteps, "- Run `/uf.finale` to create PR and watch CI") {
+			t.Error("demo example missing fixed /uf.finale option")
+		}
+		if !strings.Contains(demoNextSteps, "[tier-specific refinement option selected above]") {
+			t.Error("demo example missing tier-selected refinement option")
+		}
+		for _, param := range []string{"whatWasBuilt:", "howToVerify:", "testResults:"} {
+			if !strings.Contains(demoNextSteps, param) {
+				t.Errorf("demo format_unleash_demo invocation missing %s", param)
+			}
+		}
+	})
+
+	t.Run("step 10 persists the summary through write_unleash_summary", func(t *testing.T) {
+		if !strings.Contains(stepTenPersistence, "write_unleash_summary") {
+			t.Error("step 10 missing write_unleash_summary invocation")
+		}
+		for _, param := range []string{
+			"change_name:",
+			"tier: WORKFLOW_TIER",
+			"feature_dir:",
+			"review_verdicts:",
+			"learnings_stored:",
+			"whatWasBuilt:",
+			"howToVerify:",
+			"testResults:",
+		} {
+			if !strings.Contains(stepTenPersistence, param) {
+				t.Errorf("step 10 write_unleash_summary invocation missing %s", param)
+			}
+		}
+		if strings.Contains(stepTenPersistence, "persist_unleash_summary") {
+			t.Error("step 10 still references the superseded persist_unleash_summary tool name")
+		}
+	})
+
+	t.Run("ceremony reduced to the two checkpoint calls", func(t *testing.T) {
+		if got := strings.Count(command, "CHECKPOINT: Call"); got != 2 {
+			t.Errorf("unleash command checkpoint ceremony count = %d, want 2", got)
+		}
+	})
+
+	t.Run("code-review fix loop delegates through uf_delegate_command", func(t *testing.T) {
+		fixLoop := between(t, command, "enter the fix loop", "If the verdict is INCONCLUSIVE or UNAVAILABLE")
+		if !strings.Contains(fixLoop, "uf_delegate_command") {
+			t.Error("fix loop missing uf_delegate_command delegation")
+		}
+		if !strings.Contains(fixLoop, "prompt:") {
+			t.Error("fix loop delegation missing prompt-only call shape")
+		}
+		if strings.Contains(fixLoop, "command_path:") {
+			t.Error("fix loop delegation must be prompt-only (no command_path)")
+		}
+		if strings.Contains(fixLoop, "via the Task tool") {
+			t.Error("fix loop still delegates via the Task tool")
+		}
+	})
+
+	t.Run("step 2 plan delegates through uf_delegate_command", func(t *testing.T) {
+		planStep := between(t, command, "### 4. Step 2 -- Plan", "### 5. Step 3 -- Tasks")
+		if !strings.Contains(planStep, "uf_delegate_command") {
+			t.Error("plan step missing uf_delegate_command delegation")
+		}
+		if !strings.Contains(planStep, `command_path: ".opencode/commands/speckit.plan.md"`) {
+			t.Error("plan step delegation missing speckit.plan command path")
+		}
+		if !strings.Contains(planStep, `checkpoint_step: "plan"`) {
+			t.Error("plan step delegation missing plan checkpoint step")
+		}
+		if strings.Contains(planStep, "via the Task tool") {
+			t.Error("plan step still delegates via the Task tool")
+		}
+	})
+
+	t.Run("step 3 tasks delegates through uf_delegate_command", func(t *testing.T) {
+		tasksStep := between(t, command, "### 5. Step 3 -- Tasks", "### 6. Step 4 -- Spec Review")
+		if !strings.Contains(tasksStep, "uf_delegate_command") {
+			t.Error("tasks step missing uf_delegate_command delegation")
+		}
+		if !strings.Contains(tasksStep, `command_path: ".opencode/commands/speckit.tasks.md"`) {
+			t.Error("tasks step delegation missing speckit.tasks command path")
+		}
+		if !strings.Contains(tasksStep, `checkpoint_step: "tasks"`) {
+			t.Error("tasks step delegation missing tasks checkpoint step")
+		}
+		if strings.Contains(tasksStep, "via the Task tool") {
+			t.Error("tasks step still delegates via the Task tool")
+		}
+	})
+
+	t.Run("step 5 implement delegates through uf_delegate_command", func(t *testing.T) {
+		implementStep := between(t, command, "### 7. Step 5 -- Implement", "### 8. Step 6 -- Code Review")
+		if !strings.Contains(implementStep, "uf_delegate_command") {
+			t.Error("implement step missing uf_delegate_command delegation")
+		}
+		if !strings.Contains(implementStep, "prompt:") {
+			t.Error("implement step delegation missing prompt-only call shape")
+		}
+		// Scope the prompt-only negative to the per-task
+		// delegation block so prose mentions of the
+		// `command_path` parameter elsewhere in the step
+		// cannot trip it; the Step 5 fix loop's call site
+		// carries its own dedicated pin below.
+		perTaskDelegation := between(t, command, "Sequential execution", "Parallel execution")
+		if strings.Contains(perTaskDelegation, "command_path:") {
+			t.Error("implement step per-task delegation must be prompt-only (no command_path)")
+		}
+		if strings.Contains(implementStep, "via the Task tool") {
+			t.Error("implement step still delegates via the Task tool")
+		}
+	})
+
+	// Pin: the quick tier's whole-change delegation is a
+	// third prompt-only call site (outside both the per-task
+	// and fix-loop spans), so it carries a dedicated shape
+	// pin rather than relying on span-wide negatives.
+	t.Run("quick-tier whole-change delegation is prompt-only", func(t *testing.T) {
+		quickTierDelegation := between(t, command, "an unclassified prompt-only call fails closed", "tier's only blocking build/test gate")
+		if !strings.Contains(quickTierDelegation, "uf_delegate_command") {
+			t.Error("quick-tier delegation missing uf_delegate_command")
+		}
+		if !strings.Contains(quickTierDelegation, "prompt:") {
+			t.Error("quick-tier delegation missing prompt-only call shape")
+		}
+		if !strings.Contains(quickTierDelegation, "task_classification:") {
+			t.Error("quick-tier delegation missing task_classification contract")
+		}
+		if !strings.Contains(quickTierDelegation, `checkpoint_step: "implement"`) {
+			t.Error("quick-tier delegation missing its implement checkpoint step")
+		}
+		if strings.Contains(quickTierDelegation, "command_path:") {
+			t.Error("quick-tier delegation must be prompt-only (no command_path)")
+		}
+		if strings.Contains(quickTierDelegation, "via the Task tool") {
+			t.Error("quick-tier delegation still delegates via the Task tool")
+		}
+	})
+
+	t.Run("tier guidance no longer enumerated inline", func(t *testing.T) {
+		if strings.Contains(specReviewExit, "`/speckit.clarify` to address the findings") {
+			t.Error("spec review exit still enumerates speckit guidance inline")
+		}
+		if strings.Contains(specReviewExit, "artifacts under `openspec/changes/<name>/` to") {
+			t.Error("spec review exit still enumerates openspec guidance inline")
+		}
+	})
+
+	t.Run("hand-rolled output templates removed", func(t *testing.T) {
+		if strings.Contains(command, "Before composing this exit message, re-read the") {
+			t.Error("command still carries the spec review re-read instruction")
+		}
+		if strings.Contains(command, "Format the output as:") {
+			t.Error("command still carries the hand-rolled demo output template")
+		}
+	})
+
+	// Pin: resume re-initialization reads persisted state
+	// through get_progress before rebuilding the TodoWrite list.
+	t.Run("progress tracking re-initializes through get_progress", func(t *testing.T) {
+		if !strings.Contains(progressTracking, "get_progress") {
+			t.Error("progress tracking section missing get_progress invocation")
+		}
+		if !strings.Contains(progressTracking, `command: "uf.unleash"`) {
+			t.Error("progress tracking get_progress invocation missing command parameter")
+		}
+		for _, field := range []string{"completed_steps", "current_step"} {
+			if !strings.Contains(progressTracking, field) {
+				t.Errorf("progress tracking get_progress consumption missing %s result field", field)
+			}
+		}
+	})
+
+	// Pin: startup cleanup enumerates and clears stale worktrees
+	// through the forge worktree tools before any pipeline logic.
+	t.Run("startup cleanup routes through the forge worktree tools", func(t *testing.T) {
+		if !strings.Contains(startupCleanup, "forge_worktree_list") {
+			t.Error("startup cleanup missing forge_worktree_list invocation")
+		}
+		if !strings.Contains(startupCleanup, "forge_worktree_cleanup") {
+			t.Error("startup cleanup missing forge_worktree_cleanup invocation")
+		}
+		if !strings.Contains(startupCleanup, "cleanup_all: true") {
+			t.Error("startup cleanup forge_worktree_cleanup invocation missing cleanup_all parameter")
+		}
+	})
+
+	// Pin: the branch safety gate is the parameterless
+	// uf_unleash_branch_gate call whose payload sets the tier
+	// and feature directory for the whole pipeline.
+	t.Run("branch safety gate routes through uf_unleash_branch_gate", func(t *testing.T) {
+		if !strings.Contains(branchGateStep, "uf_unleash_branch_gate") {
+			t.Error("branch safety gate missing uf_unleash_branch_gate invocation")
+		}
+		if !strings.Contains(branchGateStep, "(no parameters)") {
+			t.Error("branch safety gate invocation must remain parameterless")
+		}
+		for _, field := range []string{"workflow_tier", "feature_dir"} {
+			if !strings.Contains(branchGateStep, field) {
+				t.Errorf("branch safety gate payload consumption missing %s field", field)
+			}
+		}
+	})
+
+	// Pin: resumability detection routes through
+	// uf_unleash_detect_resume with the tier-resolved inputs.
+	t.Run("resumability detection routes through uf_unleash_detect_resume", func(t *testing.T) {
+		if !strings.Contains(resumeDetection, "uf_unleash_detect_resume") {
+			t.Error("resumability detection missing uf_unleash_detect_resume invocation")
+		}
+		for _, param := range []string{"feature_dir: FEATURE_DIR", "workflow_tier: WORKFLOW_TIER"} {
+			if !strings.Contains(resumeDetection, param) {
+				t.Errorf("resumability detection invocation missing %s parameter", param)
+			}
+		}
+		for _, field := range []string{"step_statuses", "resume_from", "all_complete", "unchecked_count"} {
+			if !strings.Contains(resumeDetection, field) {
+				t.Errorf("resumability detection consumption missing %s result field", field)
+			}
+		}
+	})
+
+	// Pin: the clarify step scans markers, queries Dewey when
+	// available, and resolves questions through the dedicated
+	// clarification tools rather than hand-rolled spec edits.
+	t.Run("clarify routes through scan_clarifications and resolve_clarification", func(t *testing.T) {
+		if !strings.Contains(clarifyStep, "scan_clarifications") {
+			t.Error("clarify step missing scan_clarifications invocation")
+		}
+		if !strings.Contains(clarifyStep, "resolve_clarification") {
+			t.Error("clarify step missing resolve_clarification invocation")
+		}
+		if !strings.Contains(clarifyStep, "dewey_semantic_search") {
+			t.Error("clarify step missing dewey_semantic_search availability probe")
+		}
+		for _, param := range []string{"feature_dir:", "question:", "answer:", "source:"} {
+			if !strings.Contains(clarifyStep, param) {
+				t.Errorf("clarify resolve_clarification invocation missing %s parameter", param)
+			}
+		}
+	})
+
+	// Pin: the clarify exit renders through the
+	// format_unleash_exit clarify variant with the scanned
+	// question/context pairs.
+	t.Run("clarify exit routes through format_unleash_exit", func(t *testing.T) {
+		if !strings.Contains(clarifyStep, "format_unleash_exit") {
+			t.Error("clarify exit missing format_unleash_exit call")
+		}
+		if !strings.Contains(clarifyStep, `variant: "clarify"`) {
+			t.Error("clarify exit missing clarify variant")
+		}
+		if !strings.Contains(clarifyStep, "questions: [{question, context}, ...]") {
+			t.Error("clarify exit missing questions parameter")
+		}
+	})
+
+	// Pin: both review steps resolve their immutable base ref
+	// through the offline resolve_base_ref tool.
+	t.Run("review dispatch resolves the base ref through resolve_base_ref", func(t *testing.T) {
+		if !strings.Contains(specReviewDispatch, "resolve_base_ref") {
+			t.Error("spec review dispatch missing resolve_base_ref invocation")
+		}
+		if !strings.Contains(codeReviewDispatch, "resolve_base_ref") {
+			t.Error("code review dispatch missing resolve_base_ref invocation")
+		}
+		if !strings.Contains(specReviewDispatch, "(no network access)") ||
+			!strings.Contains(codeReviewDispatch, "(no network access)") {
+			t.Error("resolve_base_ref invocation lost the no-network-access contract")
+		}
+	})
+
+	// Pin: both review steps plan their dispatch through
+	// plan_review_dispatch with the mode-specific plan inputs.
+	t.Run("review dispatch plans through plan_review_dispatch", func(t *testing.T) {
+		if !strings.Contains(specReviewDispatch, "plan_review_dispatch") {
+			t.Error("spec review dispatch missing plan_review_dispatch invocation")
+		}
+		if !strings.Contains(codeReviewDispatch, "plan_review_dispatch") {
+			t.Error("code review dispatch missing plan_review_dispatch invocation")
+		}
+		if !strings.Contains(specReviewDispatch, "mode `specs`") {
+			t.Error("spec review plan_review_dispatch invocation missing specs mode")
+		}
+		if !strings.Contains(codeReviewDispatch, "mode `code`") {
+			t.Error("code review plan_review_dispatch invocation missing code mode")
+		}
+		for _, param := range []string{"full: false", "augment: false", "changed_files"} {
+			if !strings.Contains(specReviewDispatch, param) ||
+				!strings.Contains(codeReviewDispatch, param) {
+				t.Errorf("plan_review_dispatch invocation missing %s parameter", param)
+			}
+		}
+	})
+
+	// Pin: both review steps fan out through dispatch_review_runs
+	// with the shared dispatch parameters and their
+	// mode-specific context.
+	t.Run("review dispatch runs reviewers through dispatch_review_runs", func(t *testing.T) {
+		if !strings.Contains(specReviewDispatch, "dispatch_review_runs") {
+			t.Error("spec review dispatch missing dispatch_review_runs invocation")
+		}
+		if !strings.Contains(codeReviewDispatch, "dispatch_review_runs") {
+			t.Error("code review dispatch missing dispatch_review_runs invocation")
+		}
+		for _, param := range []string{
+			"diff_path",
+			"changed_files",
+			"input_context",
+			"plan_entries",
+			"session_metadata",
+			"max_parallel_runs",
+			"budget_usd",
+			"per_run_timeout_ms",
+		} {
+			if !strings.Contains(specReviewDispatch, param) ||
+				!strings.Contains(codeReviewDispatch, param) {
+				t.Errorf("dispatch_review_runs invocation missing %s parameter", param)
+			}
+		}
+		if !strings.Contains(specReviewDispatch, "review_context") {
+			t.Error("spec review dispatch_review_runs invocation missing review_context parameter")
+		}
+		if !strings.Contains(codeReviewDispatch, "pre_flight_results") {
+			t.Error("code review dispatch_review_runs invocation missing pre_flight_results parameter")
+		}
+		if !strings.Contains(specReviewDispatch, "exactly once") ||
+			!strings.Contains(codeReviewDispatch, "exactly once") {
+			t.Error("dispatch_review_runs invocation lost the exactly-once contract")
+		}
+	})
+
+	// Pin: both review steps finalize through consolidate_dispatch
+	// with the review-council workflow provenance.
+	t.Run("review dispatch consolidates through consolidate_dispatch", func(t *testing.T) {
+		if !strings.Contains(specReviewDispatch, "consolidate_dispatch") {
+			t.Error("spec review dispatch missing consolidate_dispatch invocation")
+		}
+		if !strings.Contains(codeReviewDispatch, "consolidate_dispatch") {
+			t.Error("code review dispatch missing consolidate_dispatch invocation")
+		}
+		if !strings.Contains(specReviewDispatch, `workflow_id: "uf.review-council"`) ||
+			!strings.Contains(codeReviewDispatch, `workflow_id: "uf.review-council"`) {
+			t.Error("consolidate_dispatch invocation missing workflow_id provenance parameter")
+		}
+		if !strings.Contains(specReviewDispatch, "40-character head") ||
+			!strings.Contains(codeReviewDispatch, "40-character head") {
+			t.Error("consolidate_dispatch invocation missing head SHA provenance requirement")
+		}
+	})
+
+	// Pin: implement reads the task breakdown through parse_tasks
+	// before any delegation.
+	t.Run("implement parses tasks through parse_tasks", func(t *testing.T) {
+		if !strings.Contains(implementExecution, "parse_tasks") {
+			t.Error("implement step missing parse_tasks invocation")
+		}
+		if !strings.Contains(implementExecution, `tasks_path: FEATURE_DIR + "tasks.md"`) {
+			t.Error("implement parse_tasks invocation missing tasks_path parameter")
+		}
+		for _, field := range []string{"total_tasks", "done_count", "all_done"} {
+			if !strings.Contains(implementExecution, field) {
+				t.Errorf("implement parse_tasks consumption missing %s result field", field)
+			}
+		}
+	})
+
+	// Pin: implement records progress through mark_task_complete
+	// immediately after each successful delegation.
+	t.Run("implement marks tasks complete through mark_task_complete", func(t *testing.T) {
+		if !strings.Contains(implementExecution, "mark_task_complete") {
+			t.Error("implement step missing mark_task_complete invocation")
+		}
+		for _, param := range []string{"tasks_path:", "task_id:"} {
+			if !strings.Contains(implementExecution, param) {
+				t.Errorf("implement mark_task_complete invocation missing %s parameter", param)
+			}
+		}
+	})
+
+	// Pin: parallel implement execution isolates workers through
+	// the forge worktree lifecycle tools.
+	t.Run("implement parallel workers route through the forge worktree tools", func(t *testing.T) {
+		for _, tool := range []string{
+			"forge_worktree_create",
+			"forge_spawn_subtask",
+			"forge_worktree_merge",
+			"forge_worktree_cleanup",
+		} {
+			if !strings.Contains(implementExecution, tool) {
+				t.Errorf("implement parallel execution missing %s invocation", tool)
+			}
+		}
+		if !strings.Contains(implementExecution, "task ID, and current commit hash") {
+			t.Error("implement forge_worktree_create invocation missing its parameter contract")
+		}
+		if !strings.Contains(implementExecution, "files from the task") {
+			t.Error("implement forge_spawn_subtask invocation missing its parameter contract")
+		}
+		if !strings.Contains(implementExecution, "cleanup_all: true") {
+			t.Error("implement forge_worktree_cleanup invocation missing cleanup_all parameter")
+		}
+		// The spawn call block carries the delegation
+		// classification contract as tool parameters. Scoped to
+		// the parallel-execution span: the sequential
+		// uf_delegate_command block passes the same parameter
+		// names, so a step-wide Contains could not prove the
+		// spawn block itself carries them.
+		parallelExecution := between(t, command, "3. **Parallel execution**", "4. **Phase checkpoint**")
+		for _, param := range []string{
+			"task_classification:",
+			"skill: [repo skill or script reference",
+			"skill_absent_reason: [what was searched",
+		} {
+			if !strings.Contains(parallelExecution, param) {
+				t.Errorf("implement spawn call block missing %s parameter", param)
+			}
+		}
+		// The superseded description-as-carrier sentence must
+		// stay gone from both the embedded mirror and the
+		// canonical command file.
+		staleSentence := "The spawn tool has no classification parameters"
+		if strings.Contains(command, staleSentence) {
+			t.Error("embedded uf.unleash.md still carries the stale no-classification-parameters sentence")
+		}
+		root := findProjectRoot(t)
+		if root == "" {
+			t.Fatalf("project root not found; cannot verify canonical uf.unleash.md")
+		}
+		canonical, readErr := os.ReadFile(filepath.Join(root, ".opencode", "commands", "uf.unleash.md"))
+		if readErr != nil {
+			t.Fatalf("read canonical uf.unleash.md: %v", readErr)
+		}
+		if strings.Contains(string(canonical), staleSentence) {
+			t.Error("canonical uf.unleash.md still carries the stale no-classification-parameters sentence")
+		}
+	})
+
+	// Pin: worktree merges are verified through
+	// scan_conflict_markers before cleanup proceeds.
+	t.Run("implement scans merge residue through scan_conflict_markers", func(t *testing.T) {
+		if !strings.Contains(implementExecution, "scan_conflict_markers") {
+			t.Error("implement step missing scan_conflict_markers invocation")
+		}
+		if !strings.Contains(implementExecution, "paths: [files affected by the merge]") {
+			t.Error("implement scan_conflict_markers invocation missing paths parameter")
+		}
+	})
+
+	// Pin: the implement worker-failure exit renders through the
+	// format_unleash_exit implement-worker-failed variant.
+	t.Run("implement worker-failure exit routes through format_unleash_exit", func(t *testing.T) {
+		if !strings.Contains(implementExecution, "format_unleash_exit") {
+			t.Error("implement step missing format_unleash_exit call")
+		}
+		if !strings.Contains(implementExecution, `variant: "implement-worker-failed"`) {
+			t.Error("implement step missing implement-worker-failed variant")
+		}
+		for _, param := range []string{
+			"phase: [phase number]",
+			"failed_task: [task ID and description]",
+			"error: [error details from worker]",
+		} {
+			if !strings.Contains(implementExecution, param) {
+				t.Errorf("implement worker-failure exit missing %s parameter", param)
+			}
+		}
+	})
+
+	// Pin: the merge-conflict exit renders through the
+	// format_unleash_exit implement-merge-conflict variant.
+	t.Run("implement merge-conflict exit routes through format_unleash_exit", func(t *testing.T) {
+		if !strings.Contains(implementExecution, `variant: "implement-merge-conflict"`) {
+			t.Error("implement step missing implement-merge-conflict variant")
+		}
+		for _, param := range []string{
+			"phase: [phase number]",
+			"conflicting_files: [paths from the scan result]",
+		} {
+			if !strings.Contains(implementExecution, param) {
+				t.Errorf("implement merge-conflict exit missing %s parameter", param)
+			}
+		}
+	})
+
+	// Pin: the phase-checkpoint exit renders through the
+	// format_unleash_exit implement-phase-checkpoint variant.
+	t.Run("implement phase-checkpoint exit routes through format_unleash_exit", func(t *testing.T) {
+		if !strings.Contains(implementExecution, `variant: "implement-phase-checkpoint"`) {
+			t.Error("implement step missing implement-phase-checkpoint variant")
+		}
+		for _, param := range []string{
+			"phase: [phase number]",
+			"failed_command: [the command that failed]",
+			"output: [error output]",
+		} {
+			if !strings.Contains(implementExecution, param) {
+				t.Errorf("implement phase-checkpoint exit missing %s parameter", param)
+			}
+		}
+	})
+
+	// Pin: failing checks at blocking gates route through the
+	// build/test fix loop before any exit fires. Each wiring
+	// site carries a distinct phrase so deleting either one
+	// fails this subtest (span-machinery intent: one distinct
+	// phrase per wiring site).
+	t.Run("blocking gates run the build/test fix loop before exiting", func(t *testing.T) {
+		if !strings.Contains(implementExecution, "build/test fix loop (defined below the") {
+			t.Error("quick-tier pre-flight gate missing the build/test fix loop wiring")
+		}
+		if !strings.Contains(implementExecution, "build/test fix loop (above)") {
+			t.Error("phase checkpoint missing the build/test fix loop wiring")
+		}
+		for _, param := range []string{
+			// causality filter at gate entry
+			"classify every failure by causality",
+			"never enter the loop",
+			// loop cap and exhaustion phrase
+			"up to 3 total",
+			"If a check still fails after the loop's 3 iterations",
+			// deterministic re-run and green supersession
+			"re-run the exact",
+			"superseding",
+		} {
+			if !strings.Contains(implementExecution, param) {
+				t.Errorf("implement fix loop missing %s parameter", param)
+			}
+		}
+		if !strings.Contains(codeReviewStep, "build/test fix loop (defined in Step 5)") {
+			t.Error("code review preflight missing the build/test fix loop wiring")
+		}
+	})
+
+	// Pin: the fix-loop iteration budget is durable -- recorded
+	// in each gate's checkpoint data as a gate-distinct free-form
+	// data key and continued on resume, never reset per session.
+	// Each store site carries a distinct contiguous phrase so
+	// deleting any one store fails this subtest. The seam pin
+	// ("iteration:" absent) keeps the count on the free-form data
+	// keys: the checkpoint tool persists only number, verdict, and
+	// inventory from the structured phase object.
+	t.Run("fix loop iteration budget survives resume", func(t *testing.T) {
+		for _, param := range []string{
+			// quick-gate budget-only checkpoint step
+			"quick-fix-budget",
+			// quick-gate completion-claim separation
+			"ONLY completion",
+			// quick-gate checkpoint data key
+			"fixLoopQuick",
+			// quick-gate budget phrasing
+			"iterations used, 0 if the",
+			// phase-checkpoint data key
+			"fixLoopPhase[N]",
+			// phase-checkpoint budget phrasing
+			"iterations used so far",
+			// resume rule (loop block)
+			"never 3 more per resume",
+			// phase-checkpoint durability prose
+			"read it back on resume",
+		} {
+			if !strings.Contains(implementExecution, param) {
+				t.Errorf("implement fix loop missing durable iteration budget wiring: %s", param)
+			}
+		}
+		if strings.Contains(implementExecution, "iteration:") {
+			t.Error("fix-loop budget must ride the free-form data keys, not the structured phase object (checkpoint tool drops undeclared phase fields)")
+		}
+		for _, param := range []string{
+			// Step 6 preflight data key and durability phrasing
+			"fixLoopPreflight",
+			"3-attempt budget spans sessions",
+		} {
+			if !strings.Contains(codeReviewStep, param) {
+				t.Errorf("step 6 preflight missing durable iteration budget wiring: %s", param)
+			}
+		}
+	})
+
+	// Pin: the loop's exit half -- the fail-closed
+	// classification fallback, exhaustion exits at each
+	// gate, supersession at the recording site, and the
+	// guardrails exit-list entry. Each phrase is
+	// site-unique so deleting one wiring fails this
+	// subtest.
+	t.Run("fix loop exits and supersession stay wired", func(t *testing.T) {
+		if !strings.Contains(implementExecution, "fail closed into the loop") {
+			t.Error("causality contract missing the fail-closed classification rule")
+		}
+		if !strings.Contains(implementExecution, "the phase checkpoint with verdict") {
+			t.Error("phase checkpoint missing green-supersession at the recording site")
+		}
+		if !strings.Contains(implementExecution, "When the loop exhausts its 3 iterations") {
+			t.Error("phase checkpoint missing its exhaustion exit")
+		}
+		if !strings.Contains(codeReviewStep, "persist after 3 iterations") {
+			t.Error("step 6 preflight missing its persistence STOP")
+		}
+		guardrails := between(t, command, "## Guardrails", "</protect>")
+		if !strings.Contains(guardrails, "after the fix loop's") {
+			t.Error("guardrails exit list missing the fix-loop exhaustion exit")
+		}
+	})
+
+	// Pin: the Step 5 build/test fix loop delegates through
+	// uf_delegate_command with the prompt-only, classified call
+	// shape (mirrors the Step 6 fix-loop delegation pin above).
+	t.Run("build/test fix loop delegates through uf_delegate_command", func(t *testing.T) {
+		buildTestFixLoop := between(t, command, "**Build/test fix loop**", "**For each phase in tasks.md**")
+		if !strings.Contains(buildTestFixLoop, "uf_delegate_command") {
+			t.Error("build/test fix loop missing uf_delegate_command delegation")
+		}
+		if !strings.Contains(buildTestFixLoop, "prompt:") {
+			t.Error("build/test fix loop delegation missing prompt-only call shape")
+		}
+		if !strings.Contains(buildTestFixLoop, "task_classification:") {
+			t.Error("build/test fix loop delegation missing task_classification contract")
+		}
+		if strings.Contains(buildTestFixLoop, "command_path:") {
+			t.Error("build/test fix loop delegation must be prompt-only (no command_path)")
+		}
+		if strings.Contains(buildTestFixLoop, "checkpoint_step:") {
+			t.Error("build/test fix loop delegation must be prompt-only (no checkpoint_step)")
+		}
+		if strings.Contains(buildTestFixLoop, "via the Task tool") {
+			t.Error("build/test fix loop still delegates via the Task tool")
+		}
+	})
+
+	// Pin: the code-review preflight exit renders through the
+	// format_unleash_exit code-review-preflight variant.
+	t.Run("code-review preflight exit routes through format_unleash_exit", func(t *testing.T) {
+		if !strings.Contains(codeReviewStep, "format_unleash_exit") {
+			t.Error("code review step missing format_unleash_exit call")
+		}
+		if !strings.Contains(codeReviewStep, `variant: "code-review-preflight"`) {
+			t.Error("code review step missing code-review-preflight variant")
+		}
+		if !strings.Contains(codeReviewStep, "findings: [branch-caused failures with full output]") {
+			t.Error("code-review preflight exit missing findings parameter")
+		}
+	})
+
+	// Pin: the no-success exit renders through the
+	// format_unleash_exit code-review-no-success variant.
+	t.Run("code-review no-success exit routes through format_unleash_exit", func(t *testing.T) {
+		if !strings.Contains(codeReviewStep, `variant: "code-review-no-success"`) {
+			t.Error("code review step missing code-review-no-success variant")
+		}
+		if !strings.Contains(codeReviewStep, "reasons: [which reviewers ran or failed, and why]") {
+			t.Error("code-review no-success exit missing reasons parameter")
+		}
+	})
+
+	// Pin: the iterations-exhausted exit renders through the
+	// format_unleash_exit code-review-iterations-exhausted
+	// variant.
+	t.Run("code-review iterations-exhausted exit routes through format_unleash_exit", func(t *testing.T) {
+		if !strings.Contains(codeReviewStep, `variant: "code-review-iterations-exhausted"`) {
+			t.Error("code review step missing code-review-iterations-exhausted variant")
+		}
+		for _, param := range []string{"persistent_findings:", "circular_dependencies:"} {
+			if !strings.Contains(codeReviewStep, param) {
+				t.Errorf("code-review iterations-exhausted exit missing %s parameter", param)
+			}
+		}
+	})
+
+	// Pin: the retrospective stores learnings through
+	// dewey_store_learning when Dewey is available.
+	t.Run("retrospective stores learnings through dewey_store_learning", func(t *testing.T) {
+		if !strings.Contains(retrospectiveStep, "dewey_store_learning") {
+			t.Error("retrospective missing dewey_store_learning invocation")
+		}
+		if !strings.Contains(retrospectiveStep, "If Dewey is available") {
+			t.Error("retrospective missing the Dewey availability guard")
+		}
+		if !strings.Contains(retrospectiveStep, "with tags including") {
+			t.Error("retrospective dewey_store_learning invocation missing tags parameter")
+		}
+	})
+
+	// Pin: pipeline completion clears the progress state through
+	// clear_progress.
+	t.Run("completion clears progress state through clear_progress", func(t *testing.T) {
+		if !strings.Contains(demoCompletion, "clear_progress") {
+			t.Error("pipeline completion missing clear_progress invocation")
+		}
+		if !strings.Contains(demoCompletion, `command: "uf.unleash"`) {
+			t.Error("completion clear_progress invocation missing command parameter")
+		}
+	})
+}
+
+func TestPluginPackageInputs_ExactVersionsAndLockIntegrity(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatal("project root not found")
+	}
+
+	expectedRuntime := map[string]string{
+		"@opencode-ai/plugin": "1.19.0",
+		"zod":                 "4.1.8",
+	}
+	expectedDevelopment := map[string]string{
+		"@vitest/coverage-v8": "5.0.3",
+		"vitest":              "5.0.3",
+	}
+	expectedOverrides := map[string]string{
+		"toml": "4.2.0",
+		"uuid": "13.0.1",
+	}
+	expectedEngines := map[string]string{
+		"node": "^22.22.2 || ^24.15.0 || >=26.0.0",
+	}
+
+	var manifest struct {
+		Name            string            `json:"name"`
+		Private         bool              `json:"private"`
+		Type            string            `json:"type"`
+		Scripts         map[string]string `json:"scripts"`
+		Engines         map[string]string `json:"engines"`
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+		Overrides       map[string]string `json:"overrides"`
+	}
+	readJSONFile(t, filepath.Join(root, ".opencode", "package.json"), &manifest)
+	if manifest.Name != "unbound-force-opencode-plugins" {
+		t.Errorf("manifest name = %q, want unbound-force-opencode-plugins", manifest.Name)
+	}
+	if !manifest.Private {
+		t.Error("manifest must be private")
+	}
+	if manifest.Type != "module" {
+		t.Errorf("manifest type = %q, want module", manifest.Type)
+	}
+	if len(manifest.Scripts) != 0 {
+		t.Errorf("task 1.5 must not add npm scripts, got %v", manifest.Scripts)
+	}
+	assertStringMap(t, "runtime dependencies", manifest.Dependencies, expectedRuntime)
+	assertStringMap(t, "development dependencies", manifest.DevDependencies, expectedDevelopment)
+	assertStringMap(t, "security overrides", manifest.Overrides, expectedOverrides)
+	assertStringMap(t, "node engines", manifest.Engines, expectedEngines)
+
+	var lock struct {
+		Name            string                      `json:"name"`
+		LockfileVersion int                         `json:"lockfileVersion"`
+		Requires        bool                        `json:"requires"`
+		Packages        map[string]packageLockEntry `json:"packages"`
+	}
+	readJSONFile(t, filepath.Join(root, ".opencode", "package-lock.json"), &lock)
+	if lock.Name != manifest.Name {
+		t.Errorf("lock name = %q, want manifest name %q", lock.Name, manifest.Name)
+	}
+	if lock.LockfileVersion != 3 {
+		t.Errorf("lockfileVersion = %d, want 3", lock.LockfileVersion)
+	}
+	if !lock.Requires {
+		t.Error("lock requires must be true")
+	}
+	lockRoot, ok := lock.Packages[""]
+	if !ok {
+		t.Fatal("lock is missing the root package entry")
+	}
+	assertStringMap(t, "locked runtime dependencies", lockRoot.Dependencies, expectedRuntime)
+	assertStringMap(t, "locked development dependencies", lockRoot.DevDependencies, expectedDevelopment)
+
+	for name, version := range expectedRuntime {
+		assertLockedDirectPackage(t, lock.Packages, name, version, false)
+	}
+	for name, version := range expectedDevelopment {
+		assertLockedDirectPackage(t, lock.Packages, name, version, true)
+	}
+	for path, entry := range lock.Packages {
+		if path == "" || entry.Resolved == "" {
+			continue
+		}
+		if !strings.HasPrefix(entry.Integrity, "sha512-") {
+			t.Errorf("locked package %s integrity = %q, want sha512 integrity", path, entry.Integrity)
+		}
+	}
+	assertLockedSecurityOverride(t, lock.Packages, "toml", "4.2.0",
+		"sha512-TvAJjbHZlYmI323+srtqHQFyJsoWy6mI09ppkuj9+iRsqsVKG9fvTcOP7FHF2UCb0QSYtjEavffrKzdd0XgClg==")
+	assertLockedSecurityOverride(t, lock.Packages, "uuid", "13.0.1",
+		"sha512-9ezox2roIft6ExBVTVqibSd5dc5/47Sw/uY6b4SjQUT2TzQ0tltNquWA46y4xPQmdZYqvnio22SgWd41M86+jw==")
+}
+
+func assertLockedDirectPackage(
+	t *testing.T,
+	packages map[string]packageLockEntry,
+	name, version string,
+	wantDevelopment bool,
+) {
+	t.Helper()
+
+	locked, ok := packages["node_modules/"+name]
+	if !ok {
+		t.Errorf("lock is missing direct package %s", name)
+		return
+	}
+	if locked.Version != version {
+		t.Errorf("locked %s version = %q, want %q", name, locked.Version, version)
+	}
+	if locked.License != "MIT" {
+		t.Errorf("locked %s license = %q, want MIT", name, locked.License)
+	}
+	if locked.Dev != wantDevelopment {
+		t.Errorf("locked %s dev = %t, want %t", name, locked.Dev, wantDevelopment)
+	}
+	if !strings.HasPrefix(locked.Resolved, "https://registry.npmjs.org/") {
+		t.Errorf("locked %s resolved URL = %q, want npm registry URL", name, locked.Resolved)
+	}
+	if !strings.HasPrefix(locked.Integrity, "sha512-") {
+		t.Errorf("locked %s integrity = %q, want sha512 integrity", name, locked.Integrity)
+	}
+}
+
+func assertLockedSecurityOverride(
+	t *testing.T,
+	packages map[string]packageLockEntry,
+	name, version, integrity string,
+) {
+	t.Helper()
+
+	locked, ok := packages["node_modules/"+name]
+	if !ok {
+		t.Errorf("lock is missing security override %s", name)
+		return
+	}
+	if locked.Version != version {
+		t.Errorf("locked override %s version = %q, want %q", name, locked.Version, version)
+	}
+	if locked.Integrity != integrity {
+		t.Errorf("locked override %s integrity = %q, want %q", name, locked.Integrity, integrity)
+	}
+	if locked.License != "MIT" {
+		t.Errorf("locked override %s license = %q, want MIT", name, locked.License)
+	}
+}
+
+func TestPluginPackageInputs_ApprovedMaintenanceProvenance(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatal("project root not found")
+	}
+
+	type provenanceEntry struct {
+		Version             string   `json:"version"`
+		License             string   `json:"license"`
+		MaintainedBy        string   `json:"maintained_by"`
+		ProjectURL          string   `json:"project_url"`
+		RegistryMaintainers []string `json:"registry_maintainers"`
+	}
+	type overrideProvenance struct {
+		Version      string `json:"version"`
+		License      string `json:"license"`
+		GitHead      string `json:"git_head"`
+		Integrity    string `json:"integrity"`
+		MaintainedBy string `json:"maintained_by"`
+		ProjectURL   string `json:"project_url"`
+	}
+	var provenance struct {
+		VerifiedAt        string                        `json:"verified_at"`
+		Packages          map[string]provenanceEntry    `json:"packages"`
+		SecurityOverrides map[string]overrideProvenance `json:"security_overrides"`
+	}
+	readJSONFile(t, filepath.Join(root, "internal", "scaffold", "testdata", "plugin-package-provenance.json"), &provenance)
+
+	expectedPackages := map[string]struct {
+		version string
+		project string
+	}{
+		"@opencode-ai/plugin": {version: "1.19.0", project: "OpenCode"},
+		"zod":                 {version: "4.1.8", project: "Zod"},
+		"vitest":              {version: "5.0.3", project: "Vitest"},
+		"@vitest/coverage-v8": {version: "5.0.3", project: "Vitest"},
+	}
+	if provenance.VerifiedAt != "2026-10-19" {
+		t.Errorf("provenance verification date = %q, want 2026-10-19", provenance.VerifiedAt)
+	}
+	if len(provenance.Packages) != len(expectedPackages) {
+		t.Errorf("provenance has %d packages, want %d", len(provenance.Packages), len(expectedPackages))
+	}
+	for name, expected := range expectedPackages {
+		entry, ok := provenance.Packages[name]
+		if !ok {
+			t.Errorf("provenance is missing %s", name)
+			continue
+		}
+		if entry.License != "MIT" {
+			t.Errorf("%s provenance license = %q, want MIT", name, entry.License)
+		}
+		if entry.MaintainedBy != expected.project {
+			t.Errorf("%s maintained_by = %q, want %q", name, entry.MaintainedBy, expected.project)
+		}
+		if entry.Version != expected.version {
+			t.Errorf("%s provenance version = %q, want %q", name, entry.Version, expected.version)
+		}
+		parsedURL, err := url.ParseRequestURI(entry.ProjectURL)
+		if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
+			t.Errorf("%s project_url = %q, want absolute HTTPS URL", name, entry.ProjectURL)
+		}
+		if len(entry.RegistryMaintainers) == 0 {
+			t.Errorf("%s registry maintainers are empty", name)
+		}
+	}
+
+	expectedOverrides := map[string]overrideProvenance{
+		"toml": {
+			Version:      "4.2.0",
+			License:      "MIT",
+			GitHead:      "6d42b7e4fa693f8e6fb025d419b10b38107e83e2",
+			Integrity:    "sha512-TvAJjbHZlYmI323+srtqHQFyJsoWy6mI09ppkuj9+iRsqsVKG9fvTcOP7FHF2UCb0QSYtjEavffrKzdd0XgClg==",
+			MaintainedBy: "toml-node",
+			ProjectURL:   "https://github.com/BinaryMuse/toml-node",
+		},
+		"uuid": {
+			Version:      "13.0.1",
+			License:      "MIT",
+			GitHead:      "0643802db81cece7ee445f5147529d7a77394630",
+			Integrity:    "sha512-9ezox2roIft6ExBVTVqibSd5dc5/47Sw/uY6b4SjQUT2TzQ0tltNquWA46y4xPQmdZYqvnio22SgWd41M86+jw==",
+			MaintainedBy: "uuidjs",
+			ProjectURL:   "https://github.com/uuidjs/uuid",
+		},
+	}
+	if len(provenance.SecurityOverrides) != len(expectedOverrides) {
+		t.Errorf("provenance has %d security overrides, want %d",
+			len(provenance.SecurityOverrides), len(expectedOverrides))
+	}
+	for name, expected := range expectedOverrides {
+		got, ok := provenance.SecurityOverrides[name]
+		if !ok {
+			t.Errorf("provenance is missing security override %s", name)
+			continue
+		}
+		if got != expected {
+			t.Errorf("security override provenance for %s = %+v, want %+v", name, got, expected)
+		}
+		parsedURL, err := url.ParseRequestURI(got.ProjectURL)
+		if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" {
+			t.Errorf("%s override project_url = %q, want absolute HTTPS URL", name, got.ProjectURL)
+		}
+	}
+}
+
+func TestPluginPackageInputs_GitignoreTracksCanonicalInputs(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatal("project root not found")
+	}
+
+	content, err := os.ReadFile(filepath.Join(root, ".opencode", ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .opencode/.gitignore: %v", err)
+	}
+	want := "node_modules\nbun.lock\n"
+	if string(content) != want {
+		t.Errorf(".opencode/.gitignore = %q, want %q", string(content), want)
+	}
+	for _, trackedInput := range []string{"package.json", "package-lock.json"} {
+		if strings.Contains(string(content), trackedInput) {
+			t.Errorf(".opencode/.gitignore must not ignore %s", trackedInput)
+		}
+	}
+}
+
+func TestPluginPackageInputs_MirrorsMatchCanonical(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatal("project root not found")
+	}
+
+	for _, name := range []string{"package.json", "package-lock.json"} {
+		canonical, err := os.ReadFile(filepath.Join(root, ".opencode", name))
+		if err != nil {
+			t.Fatalf("read canonical %s: %v", name, err)
+		}
+		mirror, err := assetContent(filepath.ToSlash(filepath.Join("opencode", name)))
+		if err != nil {
+			t.Fatalf("read scaffold mirror %s: %v", name, err)
+		}
+		if !bytes.Equal(canonical, mirror) {
+			t.Errorf("scaffold mirror %s differs from canonical input", name)
+		}
+	}
+}
+
+func TestSCFR003_FreshTargetInputsDoNotActivatePlugins(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatal("project root not found")
+	}
+
+	target := t.TempDir()
+	var output bytes.Buffer
+	result, err := runScaffoldWithoutExternalTools(t, Options{
+		TargetDir: target,
+		Version:   "1.0.0-test",
+		Stdout:    &output,
+		LookPath:  stubScaffoldLookPath(nil),
+		ExecCmd: func(name string, args ...string) ([]byte, error) {
+			t.Fatalf("fresh package-input scaffold unexpectedly executed %s %v", name, args)
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	for _, name := range []string{"package.json", "package-lock.json"} {
+		canonical, err := os.ReadFile(filepath.Join(root, ".opencode", name))
+		if err != nil {
+			t.Fatalf("read canonical %s: %v", name, err)
+		}
+		generatedPath := filepath.Join(target, ".opencode", name)
+		generated, err := os.ReadFile(generatedPath)
+		if err != nil {
+			t.Fatalf("read fresh-target %s: %v", name, err)
+		}
+		if !bytes.Equal(generated, canonical) {
+			t.Errorf("fresh-target %s differs from canonical reproducible input", name)
+		}
+		if !containsPath(result.Created, filepath.ToSlash(filepath.Join(".opencode", name))) {
+			t.Errorf("fresh-target %s is absent from result.Created", name)
+		}
+	}
+
+	for _, relPath := range []string{invokeAgentPluginAsset, reviewDispatchPluginAsset, ufWorkflowPluginAsset, ufFinalePluginAsset} {
+		if !isActivationGatedAsset(relPath) {
+			t.Errorf("plugin source %s is not activation-gated", relPath)
+		}
+		if _, err := assetContent(relPath); err != nil {
+			t.Errorf("read embedded activation-gated source %s: %v", relPath, err)
+		}
+		autoDiscoveryPath := filepath.Join(target, mapAssetPath(relPath))
+		if _, err := os.Stat(autoDiscoveryPath); !os.IsNotExist(err) {
+			t.Errorf("activation-gated source exposed at %s before install and probes: %v", autoDiscoveryPath, err)
+		}
+		if containsPath(result.Created, mapAssetPath(relPath)) {
+			t.Errorf("activation-gated source %s reported as created", relPath)
+		}
+	}
+
+	pluginsDir := filepath.Join(target, ".opencode", "plugins")
+	if _, err := os.Stat(pluginsDir); !os.IsNotExist(err) {
+		t.Errorf("auto-discovery directory exists before plugin activation: %v", err)
+	}
+}
+
+func TestIsActivationGatedAsset_OnlyReviewPluginSources(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: invokeAgentPluginAsset, want: true},
+		{path: reviewDispatchPluginAsset, want: true},
+		{path: ufWorkflowPluginAsset, want: true},
+		{path: "opencode/package.json", want: false},
+		{path: "opencode/lib/review-dispatch-sibling-evidence.ts", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			got := isActivationGatedAsset(test.path)
+			if got != test.want {
+				t.Errorf("isActivationGatedAsset(%q) = %t, want %t", test.path, got, test.want)
+			}
+		})
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, path := range paths {
+		if path == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPluginPackageInputs_RollbackPrerequisites(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatal("project root not found")
+	}
+
+	var rollback struct {
+		BaselineLockSHA256 string `json:"baseline_lock_sha256"`
+		PriorGitignore     string `json:"prior_gitignore"`
+		SecurityOverride   struct {
+			LockSHA256         string            `json:"lock_sha256"`
+			TransitiveVersions map[string]string `json:"transitive_versions"`
+		} `json:"security_override_rollback"`
+	}
+	readJSONFile(t, filepath.Join(root, "internal", "scaffold", "testdata", "plugin-package-rollback.json"), &rollback)
+
+	const baselineLockSHA256 = "1ac9cdf171a743c69b18498e15711d628280a4748defd6334cd4276e194d32dc"
+	if rollback.BaselineLockSHA256 != baselineLockSHA256 {
+		t.Errorf("baseline lock SHA256 = %q, want %q", rollback.BaselineLockSHA256, baselineLockSHA256)
+	}
+	const priorGitignore = "node_modules\npackage.json\nbun.lock\n.gitignore\n"
+	if rollback.PriorGitignore != priorGitignore {
+		t.Errorf("prior .opencode/.gitignore = %q, want %q", rollback.PriorGitignore, priorGitignore)
+	}
+	const preHardeningLockSHA256 = "fef6f7f145d9dc8398233566934ff7a4e36d9505dbcb662660c773c03c1cdcba"
+	if rollback.SecurityOverride.LockSHA256 != preHardeningLockSHA256 {
+		t.Errorf("pre-hardening lock SHA256 = %q, want %q",
+			rollback.SecurityOverride.LockSHA256, preHardeningLockSHA256)
+	}
+	assertStringMap(t, "pre-hardening transitive versions",
+		rollback.SecurityOverride.TransitiveVersions,
+		map[string]string{"toml": "4.1.1", "uuid": "13.0.0"})
+}
+
+func TestDispatchRuntime_TaskScopedPluginSources(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatal("project root not found")
+	}
+
+	invokeCanonical := filepath.Join(root, ".opencode", "plugins", "invoke-agent", "index.ts")
+	if _, err := os.Stat(invokeCanonical); err != nil {
+		t.Fatalf("task 2.2 invoke-agent source missing at %s: %v", invokeCanonical, err)
+	}
+	invokeEmbedded := filepath.ToSlash(filepath.Join("opencode", "plugins", "invoke-agent", "index.ts"))
+	if _, err := assetContent(invokeEmbedded); err != nil {
+		t.Fatalf("task 2.2 invoke-agent scaffold mirror missing at %s: %v", invokeEmbedded, err)
+	}
+
+	reviewCanonical := filepath.Join(root, ".opencode", "plugins", "review-dispatch", "index.ts")
+	if _, err := os.Stat(reviewCanonical); err != nil {
+		t.Fatalf("task 2.1 review-dispatch source missing at %s: %v", reviewCanonical, err)
+	}
+	reviewEmbedded := filepath.ToSlash(filepath.Join("opencode", "plugins", "review-dispatch", "index.ts"))
+	if _, err := assetContent(reviewEmbedded); err != nil {
+		t.Fatalf("task 2.1 review-dispatch scaffold mirror missing at %s: %v", reviewEmbedded, err)
 	}
 }
 
@@ -140,21 +1852,22 @@ func mapAssetToSource(relPath string) string {
 // expectedAssetPaths is the canonical list of embedded assets.
 // Update this list when adding or removing assets.
 var expectedAssetPaths = []string{
-	// OpenCode commands (10) — UF-custom only; speckit.*.md externalized to specify init + /uf.init
+	// OpenCode commands (12) — UF-custom only; speckit.*.md externalized to specify init + /uf.init
 	"opencode/commands/uf.address-feedback.md",
 	"opencode/commands/uf.agent-brief.md",
 	"opencode/commands/uf.cobalt-crush.md",
 	"opencode/commands/uf.constitution-check.md",
 	"opencode/commands/uf.finale.md",
 	"opencode/commands/uf.init.md",
+	"opencode/commands/uf.rebase-pr.md",
 	"opencode/commands/uf.review-council.md",
 	"opencode/commands/uf.review-pr.md",
+	"opencode/commands/uf.run-pipeline-plan.md",
 	"opencode/commands/uf.triage-issue.md",
 	"opencode/commands/uf.unleash.md",
-	// OpenCode agents — Divisor personas (6) + Cobalt-Crush (1) + Mx F coach (1) + constitution-check (1)
+	// OpenCode agents — Divisor personas (6) + Cobalt-Crush (1) + constitution-check (1)
 	"opencode/agents/cobalt-crush-dev.md",
 	"opencode/agents/constitution-check.md",
-	"opencode/agents/mx-f-coach.md", // Spec 007: Mx F coaching persona (user-owned, not in --divisor subset, not tool-owned)
 	"opencode/agents/divisor-adversary.md",
 	"opencode/agents/divisor-architect.md",
 	"opencode/agents/divisor-curator.md",
@@ -165,7 +1878,7 @@ var expectedAssetPaths = []string{
 	"opencode/agents/divisor-scribe.md",
 	"opencode/agents/divisor-herald.md",
 	"opencode/agents/divisor-envoy.md",
-	// Convention packs — shared by all heroes (13)
+	// Convention packs — shared by all heroes (15)
 	"opencode/uf/packs/ci-custom.md",
 	"opencode/uf/packs/ci.md",
 	"opencode/uf/packs/content-custom.md",
@@ -176,6 +1889,8 @@ var expectedAssetPaths = []string{
 	"opencode/uf/packs/go.md",
 	"opencode/uf/packs/python-custom.md",
 	"opencode/uf/packs/python.md",
+	"opencode/uf/packs/review-voice-custom.md",
+	"opencode/uf/packs/review-voice.md",
 	"opencode/uf/packs/severity.md",
 	"opencode/uf/packs/typescript-custom.md",
 	"opencode/uf/packs/typescript.md",
@@ -185,13 +1900,165 @@ var expectedAssetPaths = []string{
 	"openspec/schemas/unbound-force/templates/spec.md",
 	"openspec/schemas/unbound-force/templates/design.md",
 	"openspec/schemas/unbound-force/templates/tasks.md",
-	// Swarm skills (4)
+	// Swarm skills (6)
 	"opencode/skills/always-on-guidance/SKILL.md",
+	"opencode/skills/dispatch-advisor/SKILL.md",
 	"opencode/skills/pre-flight/SKILL.md",
 	"opencode/skills/review-context/SKILL.md",
 	"opencode/skills/speckit-workflow/SKILL.md",
+	"opencode/skills/tier-routing/SKILL.md",
+	// Review dispatch plugins and policy modules (6)
+	"opencode/plugins/invoke-agent/index.ts",
+	"opencode/plugins/review-dispatch/index.ts",
+	// UF workflow plugin and types library (2)
+	"opencode/plugins/uf-workflow/index.ts",
+	"opencode/lib/uf-workflow-types.ts",
+	// UF finale plugin (1)
+	"opencode/plugins/uf-finale/index.ts",
+	// Shared lib modules (8)
+	"opencode/lib/agent-executor.ts",
+	"opencode/lib/branch-classification.ts",
+	"opencode/lib/review-dispatch-artifact.ts",
+	"opencode/lib/review-dispatch-lesson-proposal.ts",
+	"opencode/lib/review-dispatch-sibling-evidence.ts",
+	"opencode/lib/review-diff.ts",
+	"opencode/lib/reviewer-manifest.ts",
+	"opencode/lib/unleash-templates.ts",
+	// Reproducible plugin package inputs (2)
+	"opencode/package-lock.json",
+	"opencode/package.json",
+	// Review policy and project-owned sibling template (3)
+	"uf/review-matrix.yaml",
+	"uf/reviewer-capabilities.yaml",
+	"uf/sibling-repos.yaml",
+	// Multi-model review schemas (7)
+	"uf/schemas/lesson-proposal/v1.0.0.schema.json",
+	"uf/schemas/review-dispatch/v1.0.0.schema.json",
+	"uf/schemas/review-matrix/v2.schema.json",
+	"uf/schemas/review-matrix/v3.schema.json",
+	"uf/schemas/review-verdict/v2.0.0.schema.json",
+	"uf/schemas/reviewer-capabilities/v1.0.0.schema.json",
+	"uf/schemas/sibling-repos/v1.0.0.schema.json",
 	// Specify — starter constitution (1)
 	"specify/memory/constitution.md",
+}
+
+var task42CanonicalAssets = []struct {
+	asset  string
+	source string
+}{
+	{asset: "opencode/agents/cobalt-crush-dev.md", source: ".opencode/agents/cobalt-crush-dev.md"},
+	{asset: "opencode/commands/uf.address-feedback.md", source: ".opencode/commands/uf.address-feedback.md"},
+	{asset: "opencode/commands/uf.review-council.md", source: ".opencode/commands/uf.review-council.md"},
+	{asset: "opencode/commands/uf.triage-issue.md", source: ".opencode/commands/uf.triage-issue.md"},
+	{asset: "opencode/skills/dispatch-advisor/SKILL.md", source: ".opencode/skills/dispatch-advisor/SKILL.md"},
+	{asset: invokeAgentPluginAsset, source: ".opencode/plugins/invoke-agent/index.ts"},
+	{asset: reviewDispatchPluginAsset, source: ".opencode/plugins/review-dispatch/index.ts"},
+	{asset: "opencode/plugins/uf-workflow/index.ts", source: ".opencode/plugins/uf-workflow/index.ts"},
+	{asset: "opencode/plugins/uf-finale/index.ts", source: ".opencode/plugins/uf-finale/index.ts"},
+	{asset: "opencode/lib/uf-workflow-types.ts", source: ".opencode/lib/uf-workflow-types.ts"},
+	{asset: "opencode/lib/agent-executor.ts", source: ".opencode/lib/agent-executor.ts"},
+	{asset: "opencode/lib/branch-classification.ts", source: ".opencode/lib/branch-classification.ts"},
+	{asset: "opencode/lib/review-dispatch-artifact.ts", source: ".opencode/lib/review-dispatch-artifact.ts"},
+	{asset: "opencode/lib/review-dispatch-lesson-proposal.ts", source: ".opencode/lib/review-dispatch-lesson-proposal.ts"},
+	{asset: "opencode/lib/review-dispatch-sibling-evidence.ts", source: ".opencode/lib/review-dispatch-sibling-evidence.ts"},
+	{asset: "opencode/lib/review-diff.ts", source: ".opencode/lib/review-diff.ts"},
+	{asset: "opencode/lib/reviewer-manifest.ts", source: ".opencode/lib/reviewer-manifest.ts"},
+	{asset: "opencode/lib/unleash-templates.ts", source: ".opencode/lib/unleash-templates.ts"},
+	{asset: "opencode/package-lock.json", source: ".opencode/package-lock.json"},
+	{asset: "opencode/package.json", source: ".opencode/package.json"},
+	{asset: "uf/review-matrix.yaml", source: ".uf/review-matrix.yaml"},
+	{asset: "uf/reviewer-capabilities.yaml", source: ".uf/reviewer-capabilities.yaml"},
+	{asset: "uf/schemas/lesson-proposal/v1.0.0.schema.json", source: ".uf/schemas/lesson-proposal/v1.0.0.schema.json"},
+	{asset: "uf/schemas/review-dispatch/v1.0.0.schema.json", source: ".uf/schemas/review-dispatch/v1.0.0.schema.json"},
+	{asset: "uf/schemas/review-matrix/v2.schema.json", source: ".uf/schemas/review-matrix/v2.schema.json"},
+	{asset: "uf/schemas/review-matrix/v3.schema.json", source: ".uf/schemas/review-matrix/v3.schema.json"},
+	{asset: "uf/schemas/review-verdict/v2.0.0.schema.json", source: ".uf/schemas/review-verdict/v2.0.0.schema.json"},
+	{asset: "uf/schemas/reviewer-capabilities/v1.0.0.schema.json", source: ".uf/schemas/reviewer-capabilities/v1.0.0.schema.json"},
+	{asset: "uf/schemas/sibling-repos/v1.0.0.schema.json", source: ".uf/schemas/sibling-repos/v1.0.0.schema.json"},
+}
+
+func TestSCFR001_CanonicalAssetSurfaceMatchesMirrors(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatal("project root not found")
+	}
+
+	paths, err := assetPaths()
+	if err != nil {
+		t.Fatalf("get asset paths: %v", err)
+	}
+	embedded := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		embedded[path] = true
+	}
+
+	for _, asset := range task42CanonicalAssets {
+		t.Run(asset.asset, func(t *testing.T) {
+			if !embedded[asset.asset] {
+				t.Fatalf("required embedded asset %q is missing", asset.asset)
+			}
+			if got := mapAssetToSource(asset.asset); got != asset.source {
+				t.Fatalf("mapAssetToSource(%q) = %q, want %q", asset.asset, got, asset.source)
+			}
+			mirror, err := assetContent(asset.asset)
+			if err != nil {
+				t.Fatalf("read embedded asset: %v", err)
+			}
+			canonical, err := os.ReadFile(filepath.Join(root, asset.source))
+			if err != nil {
+				t.Fatalf("read canonical source: %v", err)
+			}
+			if !bytes.Equal(mirror, canonical) {
+				t.Errorf("embedded asset %q drifted from %q", asset.asset, asset.source)
+			}
+		})
+	}
+}
+
+func TestSCFR001_SiblingTemplateAndLiveOnlyTestReviewExclusions(t *testing.T) {
+	paths, err := assetPaths()
+	if err != nil {
+		t.Fatalf("get asset paths: %v", err)
+	}
+	embedded := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		embedded[path] = true
+	}
+
+	const siblingAsset = "uf/sibling-repos.yaml"
+	if !embedded[siblingAsset] {
+		t.Fatalf("required sibling template %q is missing", siblingAsset)
+	}
+	template, err := assetContent(siblingAsset)
+	if err != nil {
+		t.Fatalf("read sibling template: %v", err)
+	}
+	if !strings.Contains(string(template), "version: 1\nsiblings: []") {
+		t.Error("sibling scaffold must remain an empty version 1 template")
+	}
+	if strings.Contains(string(template), "github.com/unbound-force/") {
+		t.Error("sibling scaffold must not contain live organization entries")
+	}
+
+	const liveOnly = "opencode/commands/speckit.testreview.md"
+	if embedded[liveOnly] {
+		t.Errorf("live-only Speckit test-review command must not be embedded as %q", liveOnly)
+	}
+	root := findProjectRoot(t)
+	if _, err := os.Stat(filepath.Join(root, ".opencode", "commands", "speckit.testreview.md")); err != nil {
+		t.Fatalf("live-only Speckit test-review command is missing: %v", err)
+	}
+}
+
+func expectedInitiallyDeployedAssetPaths() []string {
+	paths := make([]string, 0, len(expectedAssetPaths))
+	for _, path := range expectedAssetPaths {
+		if !isActivationGatedAsset(path) {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 // nonDeployedAssetPaths lists embedded assets that are NOT
@@ -237,7 +2104,7 @@ func TestRun_CreatesFiles(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -264,10 +2131,19 @@ func TestRun_CreatesFiles(t *testing.T) {
 	expectedDirs := []string{
 		".opencode/commands",
 		".opencode/agents",
+		".opencode/lib",
+		".opencode/skills/dispatch-advisor",
 		".opencode/uf/packs",
+		".uf",
 		".specify/memory",
 		"openspec/specs",
 		"openspec/changes",
+		".uf/schemas/lesson-proposal",
+		".uf/schemas/review-dispatch",
+		".uf/schemas/review-matrix",
+		".uf/schemas/review-verdict",
+		".uf/schemas/reviewer-capabilities",
+		".uf/schemas/sibling-repos",
 	}
 	for _, d := range expectedDirs {
 		full := filepath.Join(dir, d)
@@ -282,8 +2158,29 @@ func TestRun_CreatesFiles(t *testing.T) {
 	}
 
 	// Verify created file count matches expected assets
-	if len(result.Created) != len(expectedAssetPaths) {
-		t.Errorf("expected %d created files, got %d", len(expectedAssetPaths), len(result.Created))
+	expectedDeployed := expectedInitiallyDeployedAssetPaths()
+	if len(result.Created) != len(expectedDeployed) {
+		t.Errorf("expected %d created files, got %d", len(expectedDeployed), len(result.Created))
+	}
+	for _, asset := range expectedDeployed {
+		outputPath := mapAssetPath(asset)
+		if !containsPath(result.Created, outputPath) {
+			t.Errorf("expected deployed asset %q in result.Created", outputPath)
+		}
+		info, err := os.Stat(filepath.Join(dir, outputPath))
+		if err != nil {
+			t.Errorf("expected deployed asset %q to exist: %v", outputPath, err)
+			continue
+		}
+		if info.IsDir() {
+			t.Errorf("expected deployed asset %q to be a file", outputPath)
+		}
+	}
+	for _, asset := range []string{invokeAgentPluginAsset, reviewDispatchPluginAsset, ufWorkflowPluginAsset, ufFinalePluginAsset} {
+		outputPath := mapAssetPath(asset)
+		if _, err := os.Stat(filepath.Join(dir, outputPath)); !os.IsNotExist(err) {
+			t.Errorf("activation-gated asset %q must not be initially deployed: %v", outputPath, err)
+		}
 	}
 }
 
@@ -291,7 +2188,7 @@ func TestRun_ConstitutionScaffolded(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -344,12 +2241,77 @@ func TestRun_ConstitutionScaffolded(t *testing.T) {
 	}
 }
 
+// TestRun_SpecifyDelegationOnFreshInit is the Run()-level
+// regression test for the specify sentinel bug. Run()'s embedded
+// asset walk scaffolds .specify/memory/constitution.md before
+// delegating to sub-tools; under the old bare-.specify sentinel
+// that walk created the sentinel itself, silently suppressing
+// `specify init` on every fresh non-force run. Existing TestRun_*
+// tests never stub LookPath for specify (the real exec.LookPath
+// finds no binary in CI, so the delegation no-ops there too), and
+// TestInitSubTools_SpecifyInit calls initSubTools directly,
+// bypassing Run()'s scaffolding phase — which is how CI stayed
+// green while the command was broken. This test runs the full
+// Run() with only specify resolvable on a stubbed PATH and asserts
+// the delegation fires and the constitution coexists with it.
+// (D5; FR-021, FR-007)
+func TestRun_SpecifyDelegationOnFreshInit(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	rec := &scaffoldCmdRecorder{errors: map[string]error{}}
+
+	// runScaffoldWithoutExternalTools keeps the caller-supplied
+	// LookPath and guards ExecCmdInDir against unexpected external
+	// commands, mirroring TestRun_CreatesFiles and
+	// TestRun_ConstitutionScaffolded; only specify resolves.
+	_, err := runScaffoldWithoutExternalTools(t, Options{
+		TargetDir: dir,
+		Version:   "1.0.0-test",
+		Stdout:    &buf,
+		LookPath:  stubScaffoldLookPath(map[string]string{"specify": "/usr/local/bin/specify"}),
+		ExecCmd:   rec.execCmd,
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// (a) The delegation must fire with the fixed invocation
+	// contract: --force gives specify's non-empty-directory merge
+	// semantics for the target the asset walk just populated.
+	expected := "specify init --here --integration opencode --offline --force"
+	found := false
+	for _, call := range rec.calls {
+		if call == expected {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected %q, got calls: %v", expected, rec.calls)
+	}
+
+	// (b) The starter constitution must coexist with the
+	// delegation: the asset walk scaffolds it regardless of
+	// specify's merge behavior.
+	constitution := filepath.Join(dir, ".specify", "memory", "constitution.md")
+	if _, err := os.Stat(constitution); err != nil {
+		t.Errorf("expected %s to exist after Run(): %v", constitution, err)
+	}
+
+	// (c) The sub-tool results must include .specify/ initialized.
+	// Run() renders sub-results through the summary pipeline
+	// (printSubToolResults), so the action is observable on Stdout.
+	if !strings.Contains(buf.String(), ".specify/ initialized") {
+		t.Errorf("expected '.specify/ initialized' in Run() summary output, got:\n%s", buf.String())
+	}
+}
+
 func TestRun_ConstitutionPreservedOnRerun(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
 	// First run creates constitution.
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -367,7 +2329,7 @@ func TestRun_ConstitutionPreservedOnRerun(t *testing.T) {
 
 	// Re-run without --force: constitution should be preserved.
 	buf.Reset()
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -412,12 +2374,14 @@ func TestRun_ConstitutionPreservedOnRerun(t *testing.T) {
 func TestRun_ConstitutionProtectedWithForce(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
+	noTools := stubScaffoldLookPath(nil)
 
 	// First run creates constitution.
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
+		LookPath:  noTools,
 	})
 	if err != nil {
 		t.Fatalf("first Run() error: %v", err)
@@ -432,11 +2396,12 @@ func TestRun_ConstitutionProtectedWithForce(t *testing.T) {
 
 	// Re-run with --force: constitution should be protected (skipped).
 	buf.Reset()
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Force:     true,
 		Version:   "1.0.0",
 		Stdout:    &buf,
+		LookPath:  noTools,
 	})
 	if err != nil {
 		t.Fatalf("force Run() error: %v", err)
@@ -479,7 +2444,7 @@ func TestRun_SkipsExisting(t *testing.T) {
 	var buf bytes.Buffer
 
 	// First run creates everything
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -490,7 +2455,7 @@ func TestRun_SkipsExisting(t *testing.T) {
 
 	// Second run should skip user-owned, skip identical tool-owned
 	buf.Reset()
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -508,9 +2473,10 @@ func TestRun_SkipsExisting(t *testing.T) {
 		t.Errorf("expected no updated files on identical re-run, got %d: %v",
 			len(result.Updated), result.Updated)
 	}
-	if len(result.Skipped) != len(expectedAssetPaths) {
+	expectedDeployed := expectedInitiallyDeployedAssetPaths()
+	if len(result.Skipped) != len(expectedDeployed) {
 		t.Errorf("expected %d skipped files, got %d",
-			len(expectedAssetPaths), len(result.Skipped))
+			len(expectedDeployed), len(result.Skipped))
 	}
 
 	// Verify a known tool-owned file is in Skipped
@@ -541,12 +2507,14 @@ func TestRun_SkipsExisting(t *testing.T) {
 func TestRun_ForceOverwrites(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
+	noTools := stubScaffoldLookPath(nil)
 
 	// First run
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
+		LookPath:  noTools,
 	})
 	if err != nil {
 		t.Fatalf("first Run() error: %v", err)
@@ -554,11 +2522,12 @@ func TestRun_ForceOverwrites(t *testing.T) {
 
 	// Second run with --force
 	buf.Reset()
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Force:     true,
 		Version:   "1.0.0",
 		Stdout:    &buf,
+		LookPath:  noTools,
 	})
 	if err != nil {
 		t.Fatalf("force Run() error: %v", err)
@@ -567,12 +2536,13 @@ func TestRun_ForceOverwrites(t *testing.T) {
 	// Protected files (isNeverOverwrite) are skipped even with --force,
 	// so Overwritten count is total assets minus protected files.
 	neverOverwriteCount := 0
-	for _, p := range expectedAssetPaths {
+	expectedDeployed := expectedInitiallyDeployedAssetPaths()
+	for _, p := range expectedDeployed {
 		if isNeverOverwrite(p) {
 			neverOverwriteCount++
 		}
 	}
-	wantOverwritten := len(expectedAssetPaths) - neverOverwriteCount
+	wantOverwritten := len(expectedDeployed) - neverOverwriteCount
 	if len(result.Overwritten) != wantOverwritten {
 		t.Errorf("expected %d overwritten files, got %d",
 			wantOverwritten, len(result.Overwritten))
@@ -599,7 +2569,7 @@ func TestRun_VersionMarker(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.2.3",
 		Stdout:    &buf,
@@ -608,7 +2578,7 @@ func TestRun_VersionMarker(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	for _, relPath := range expectedAssetPaths {
+	for _, relPath := range expectedInitiallyDeployedAssetPaths() {
 		ext := filepath.Ext(relPath)
 		if !markerFileExtensions[ext] {
 			continue // unsupported extensions don't get markers
@@ -635,7 +2605,7 @@ func TestRun_VersionMarkerDev(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Stdout:    &buf,
 	})
@@ -644,7 +2614,7 @@ func TestRun_VersionMarkerDev(t *testing.T) {
 	}
 
 	// Version defaults to "0.0.0-dev" — check all supported files
-	for _, relPath := range expectedAssetPaths {
+	for _, relPath := range expectedInitiallyDeployedAssetPaths() {
 		ext := filepath.Ext(relPath)
 		if !markerFileExtensions[ext] {
 			continue // unsupported extensions don't get markers
@@ -672,7 +2642,7 @@ func TestRun_OverwriteOnDiff_ToolOwned(t *testing.T) {
 	var buf bytes.Buffer
 
 	// First run
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -695,7 +2665,7 @@ func TestRun_OverwriteOnDiff_ToolOwned(t *testing.T) {
 
 	// Re-run
 	buf.Reset()
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -756,7 +2726,7 @@ func TestRun_OverwriteOnDiff_SkipsIdentical(t *testing.T) {
 	var buf bytes.Buffer
 
 	// First run
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -767,7 +2737,7 @@ func TestRun_OverwriteOnDiff_SkipsIdentical(t *testing.T) {
 
 	// Re-run without any modifications
 	buf.Reset()
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -804,6 +2774,38 @@ func TestIsToolOwned(t *testing.T) {
 		// Tool-owned: OpenSpec schema
 		{"openspec/schemas/unbound-force/schema.yaml", true},
 		{"openspec/schemas/unbound-force/templates/proposal.md", true},
+		// Tool-owned: reproducible plugin package inputs
+		{"opencode/package.json", true},
+		{"opencode/package-lock.json", true},
+		// Tool-owned: activation-gated plugin sources
+		{invokeAgentPluginAsset, true},
+		{reviewDispatchPluginAsset, true},
+		{ufWorkflowPluginAsset, true},
+		// Tool-owned: shared agent executor library
+		{"opencode/lib/agent-executor.ts", true},
+		{"opencode/lib/branch-classification.ts", true},
+		{"opencode/lib/review-dispatch-artifact.ts", true},
+		// Tool-owned: review-dispatch acquisition module
+		{"opencode/lib/review-dispatch-lesson-proposal.ts", true},
+		{"opencode/lib/review-dispatch-sibling-evidence.ts", true},
+		{"opencode/lib/review-diff.ts", true},
+		{"opencode/lib/reviewer-manifest.ts", true},
+		{"opencode/lib/uf-workflow-types.ts", true},
+		{"opencode/lib/unleash-templates.ts", true},
+		// Tool-owned: canonical review policy
+		{"uf/reviewer-capabilities.yaml", true},
+		// User-owned: model policy is a supported project extension point
+		{"uf/review-matrix.yaml", false},
+		// User-owned: active sibling declarations are project-specific
+		{"uf/sibling-repos.yaml", false},
+		// Tool-owned: shared multi-model schemas
+		{"uf/schemas/review-matrix/v2.schema.json", true},
+		{"uf/schemas/review-matrix/v3.schema.json", true},
+		{"uf/schemas/reviewer-capabilities/v1.0.0.schema.json", true},
+		{"uf/schemas/sibling-repos/v1.0.0.schema.json", true},
+		{"uf/schemas/lesson-proposal/v1.0.0.schema.json", true},
+		{"uf/schemas/review-dispatch/v1.0.0.schema.json", true},
+		{"uf/schemas/review-verdict/v2.0.0.schema.json", true},
 		// Tool-owned: convention packs (canonical)
 		{"opencode/uf/packs/go.md", true},
 		{"opencode/uf/packs/default.md", true},
@@ -868,7 +2870,7 @@ func TestRun_SchemaDistribution(t *testing.T) {
 	var buf bytes.Buffer
 
 	// First run creates everything
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -891,7 +2893,7 @@ func TestRun_SchemaDistribution(t *testing.T) {
 
 	// Re-run without --force
 	buf.Reset()
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -1213,7 +3215,7 @@ func TestRun_PrintSummaryIntegration(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0",
 		Stdout:    &buf,
@@ -1269,7 +3271,6 @@ var knownNonEmbeddedFiles = map[string]bool{
 	// Agents — local-only tooling, not scaffolded by uf init
 	".opencode/agents/gaze-reporter.md":       true,
 	".opencode/agents/gaze-test-generator.md": true,
-	".opencode/agents/muti-mind-po.md":        true,
 	// Legacy reviewer agents — superseded by divisor-* (Spec 019)
 	".opencode/agents/reviewer-adversary.md": true,
 	".opencode/agents/reviewer-architect.md": true,
@@ -1280,29 +3281,11 @@ var knownNonEmbeddedFiles = map[string]bool{
 	".opencode/commands/gaze.md":                       true,
 	".opencode/commands/gaze-fix.md":                   true,
 	".opencode/commands/speckit.testreview.md":         true,
-	".opencode/commands/muti-mind.backlog-add.md":      true,
-	".opencode/commands/muti-mind.backlog-list.md":     true,
-	".opencode/commands/muti-mind.backlog-show.md":     true,
-	".opencode/commands/muti-mind.backlog-update.md":   true,
-	".opencode/commands/muti-mind.generate-stories.md": true,
-	".opencode/commands/muti-mind.init.md":             true,
-	".opencode/commands/muti-mind.prioritize.md":       true,
-	".opencode/commands/muti-mind.sync-project.md":     true,
-	".opencode/commands/muti-mind.sync-pull.md":        true,
-	".opencode/commands/muti-mind.sync-push.md":        true,
-	".opencode/commands/muti-mind.sync-status.md":      true,
-	".opencode/commands/muti-mind.sync.md":             true,
 	// OpenSpec skill commands — local workflow tooling, not scaffolded by uf init
 	".opencode/commands/opsx-apply.md":   true,
 	".opencode/commands/opsx-archive.md": true,
 	".opencode/commands/opsx-explore.md": true,
 	".opencode/commands/opsx-propose.md": true,
-	// Workflow commands — Spec 008 swarm orchestration, local-only
-	".opencode/commands/workflow-start.md":   true,
-	".opencode/commands/workflow-status.md":  true,
-	".opencode/commands/workflow-list.md":    true,
-	".opencode/commands/workflow-advance.md": true,
-	".opencode/commands/workflow-seed.md":    true,
 	// Swarm skills — Spec 008, local-only
 	".opencode/skill/unbound-force-heroes/SKILL.md": true,
 	// Replicator-scaffolded agents and commands — created by replicator init,
@@ -1310,11 +3293,11 @@ var knownNonEmbeddedFiles = map[string]bool{
 	".opencode/agents/background-worker.md": true,
 	".opencode/agents/coordinator.md":       true,
 	".opencode/agents/worker.md":            true,
-	".opencode/commands/forge.md":            true,
-	".opencode/commands/forge-status.md":     true,
-	".opencode/commands/handoff.md":          true,
-	".opencode/commands/inbox.md":            true,
-	".opencode/commands/org.md":              true,
+	".opencode/commands/forge.md":           true,
+	".opencode/commands/forge-status.md":    true,
+	".opencode/commands/handoff.md":         true,
+	".opencode/commands/inbox.md":           true,
+	".opencode/commands/org.md":             true,
 	// OpenSpec skills — created by openspec init, not scaffolded by uf init
 	".opencode/skills/openspec-apply-change/SKILL.md":   true,
 	".opencode/skills/openspec-archive-change/SKILL.md": true,
@@ -1333,6 +3316,9 @@ var knownNonEmbeddedFiles = map[string]bool{
 	// DCP config — generated programmatically by configureDCPConfig(),
 	// not embedded as a scaffold asset
 	".opencode/dcp.jsonc": true,
+	// Determinism governance — repo-local files, not present in scaffold assets
+	".opencode/uf/packs/determinism.md":           true,
+	".opencode/skills/determinism-first/SKILL.md": true,
 }
 
 func TestCanonicalSources_AreEmbedded(t *testing.T) {
@@ -1399,8 +3385,17 @@ func TestMapAssetPath_Prefixes(t *testing.T) {
 		{"openspec/schemas/unbound-force/schema.yaml", "openspec/schemas/unbound-force/schema.yaml"},
 		// specify/ maps to .specify/ (dot prefix)
 		{"specify/memory/constitution.md", ".specify/memory/constitution.md"},
+		// uf/ maps to .uf/ (dot prefix)
+		{"uf/reviewer-capabilities.yaml", ".uf/reviewer-capabilities.yaml"},
+		{"uf/sibling-repos.yaml", ".uf/sibling-repos.yaml"},
+		// uf/schemas/ maps to .uf/schemas/ via the uf/ → .uf/ prefix rule
+		{"uf/schemas/review-matrix/v2.schema.json", ".uf/schemas/review-matrix/v2.schema.json"},
+		{"uf/schemas/review-matrix/v3.schema.json", ".uf/schemas/review-matrix/v3.schema.json"},
 		// Unknown prefix passes through unchanged (default branch)
 		{"scripts/validate.sh", "scripts/validate.sh"},
+		// schemas/ passes through unchanged (default branch; mapping removed)
+		{"schemas/review-matrix/v2.schema.json", "schemas/review-matrix/v2.schema.json"},
+		{"schemas/review-matrix/v3.schema.json", "schemas/review-matrix/v3.schema.json"},
 	}
 
 	for _, tt := range tests {
@@ -1424,6 +3419,8 @@ func TestIsDivisorAsset(t *testing.T) {
 		{"opencode/agents/divisor-testing.md", true},
 		// Divisor command
 		{"opencode/commands/uf.review-council.md", true},
+		{"opencode/commands/uf.triage-issue.md", true},
+		{"opencode/commands/uf.address-feedback.md", true},
 		// Divisor convention packs
 		{"opencode/uf/packs/go.md", true},
 		{"opencode/uf/packs/default.md", true},
@@ -1433,6 +3430,37 @@ func TestIsDivisorAsset(t *testing.T) {
 		{"opencode/uf/packs/python-custom.md", true},
 		// Divisor review-context skill
 		{"opencode/skills/review-context/SKILL.md", true},
+		{"opencode/skills/dispatch-advisor/SKILL.md", true},
+		// Divisor runtime and package inputs
+		{invokeAgentPluginAsset, true},
+		{reviewDispatchPluginAsset, true},
+		{ufWorkflowPluginAsset, true},
+		{"opencode/package.json", true},
+		{"opencode/package-lock.json", true},
+		// Shared agent executor library
+		{"opencode/lib/agent-executor.ts", true},
+		{"opencode/lib/branch-classification.ts", true},
+		{"opencode/lib/review-dispatch-artifact.ts", true},
+		// Divisor acquisition implementation
+		{"opencode/lib/review-dispatch-lesson-proposal.ts", true},
+		{"opencode/lib/review-dispatch-sibling-evidence.ts", true},
+		{"opencode/lib/review-diff.ts", true},
+		{"opencode/lib/reviewer-manifest.ts", true},
+		{"opencode/lib/uf-workflow-types.ts", true},
+		{"opencode/lib/unleash-templates.ts", true},
+		// Divisor review eligibility policy
+		{"uf/reviewer-capabilities.yaml", true},
+		{"uf/review-matrix.yaml", true},
+		// Divisor sibling evidence template
+		{"uf/sibling-repos.yaml", true},
+		// Divisor contract schemas
+		{"uf/schemas/review-matrix/v2.schema.json", true},
+		{"uf/schemas/review-matrix/v3.schema.json", true},
+		{"uf/schemas/reviewer-capabilities/v1.0.0.schema.json", true},
+		{"uf/schemas/sibling-repos/v1.0.0.schema.json", true},
+		{"uf/schemas/lesson-proposal/v1.0.0.schema.json", true},
+		{"uf/schemas/review-dispatch/v1.0.0.schema.json", true},
+		{"uf/schemas/review-verdict/v2.0.0.schema.json", true},
 		// Non-Divisor assets
 		{"opencode/agents/constitution-check.md", false},
 		{"opencode/commands/speckit.specify.md", false},
@@ -1555,7 +3583,7 @@ func TestRun_DivisorSubset(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir:   dir,
 		DivisorOnly: true,
 		Version:     "1.0.0",
@@ -1575,7 +3603,7 @@ func TestRun_DivisorSubset(t *testing.T) {
 		if strings.HasPrefix(f, "openspec/") && !strings.Contains(f, "schemas/") {
 			t.Errorf("DivisorOnly should not create %s", f)
 		}
-		if strings.Contains(f, "reviewer-") {
+		if strings.Contains(f, ".opencode/agents/reviewer-") {
 			t.Errorf("DivisorOnly should not create legacy reviewer files: %s", f)
 		}
 		if strings.Contains(f, "speckit.") {
@@ -1643,7 +3671,7 @@ func TestRun_DivisorSubset_WithLangFlag(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir:   dir,
 		DivisorOnly: true,
 		Lang:        "typescript",
@@ -1688,7 +3716,7 @@ func TestRun_DivisorSubset_DefaultFallback(t *testing.T) {
 	dir := t.TempDir() // Empty — no language markers
 	var buf bytes.Buffer
 
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir:   dir,
 		DivisorOnly: true,
 		Version:     "1.0.0",
@@ -1698,13 +3726,15 @@ func TestRun_DivisorSubset_DefaultFallback(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Verify only always-deploy packs deployed (default, severity, content, ci)
+	// Verify only always-deploy packs deployed (default, severity, content,
+	// ci, review-voice)
 	for _, f := range result.Created {
 		if strings.Contains(f, "uf/packs") {
 			base := filepath.Base(f)
 			if !strings.HasPrefix(base, "default") && base != "severity.md" &&
-				!strings.HasPrefix(base, "content") && !strings.HasPrefix(base, "ci") {
-				t.Errorf("expected only default/severity/content/ci packs, got %s", f)
+				!strings.HasPrefix(base, "content") && !strings.HasPrefix(base, "ci") &&
+				!strings.HasPrefix(base, "review-voice") {
+				t.Errorf("expected only default/severity/content/ci/review-voice packs, got %s", f)
 			}
 		}
 	}
@@ -1766,7 +3796,7 @@ func TestScaffoldOutput_NoGraphthulhuReferences(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -1814,7 +3844,7 @@ func TestScaffoldOutput_NoSwarmPluginReferences(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -1864,7 +3894,7 @@ func TestScaffoldOutput_NoHivemindReferences(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -1915,7 +3945,7 @@ func TestScaffoldOutput_NoBareUnboundReferences(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -1966,7 +3996,7 @@ func TestScaffoldOutput_NoOldPathReferences(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -2066,6 +4096,467 @@ func TestDivisorAgents_NoBareFRReferences(t *testing.T) {
 	}
 }
 
+// TestDivisorGuard_DelegationDisciplineSpawnParameters pins the
+// guard's Deterministic Delegation Discipline after the
+// spawn-classification parameterization: the Swarm-path checklist
+// item audits the spawn call's task_classification, skill, and
+// skill_absent_reason parameters by name instead of the subtask
+// prompt's prose, and the superseded "has no parameter contract
+// of its own" wording is gone. Both the embedded mirror and the
+// canonical agent file are checked so neither surface can
+// regress independently.
+func TestDivisorGuard_DelegationDisciplineSpawnParameters(t *testing.T) {
+	content, err := assetContent("opencode/agents/divisor-guard.md")
+	if err != nil {
+		t.Fatalf("read embedded divisor-guard.md: %v", err)
+	}
+
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatalf("project root not found")
+	}
+	canonical, err := os.ReadFile(filepath.Join(root, ".opencode", "agents", "divisor-guard.md"))
+	if err != nil {
+		t.Fatalf("read canonical divisor-guard.md: %v", err)
+	}
+
+	assertDiscipline := func(label, text string) {
+		// The Swarm-path checklist item is bounded by the next
+		// checklist bullet so parameter names in the section
+		// intro or sibling items cannot satisfy the pin.
+		itemStart := strings.Index(text, "Does a Swarm-path spawn call")
+		if itemStart < 0 {
+			t.Errorf("%s divisor-guard.md missing the Swarm-path spawn checklist item", label)
+			return
+		}
+		item := text[itemStart:]
+		if end := strings.Index(item, "\n- "); end >= 0 {
+			item = item[:end]
+		}
+		// Backticked names keep the assertions independent:
+		// bare "skill" would match inside skill_absent_reason.
+		for _, param := range []string{"`task_classification`", "`skill`", "`skill_absent_reason`"} {
+			if !strings.Contains(item, param) {
+				t.Errorf("%s divisor-guard.md Swarm-path checklist item missing %s parameter", label, param)
+			}
+		}
+		if strings.Contains(text, "has no parameter contract of its own") {
+			t.Errorf("%s divisor-guard.md still carries the stale no-parameter-contract wording", label)
+		}
+	}
+
+	assertDiscipline("embedded mirror", string(content))
+	assertDiscipline("canonical", string(canonical))
+}
+
+// TestDeterminismPack_DE008SpawnToolParameters pins the repo-local
+// determinism pack after the spawn-classification parameterization:
+// the frontmatter carries the 1.4.0 version bump, and DE-008's
+// widened contract names the forge subtask spawn tool and carries
+// the Swarm-path delegation fields as spawn-tool parameters rather
+// than in the spawned subtask description. The pack is repo-local
+// governance, not an embedded scaffold asset (see
+// knownNonEmbeddedFiles), so it is read from the project root per
+// the findProjectRoot pattern.
+func TestDeterminismPack_DE008SpawnToolParameters(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Skip("project root not found; skipping determinism pack pin")
+	}
+	content, err := os.ReadFile(filepath.Join(root, ".opencode", "uf", "packs", "determinism.md"))
+	if err != nil {
+		t.Fatalf("read determinism.md: %v", err)
+	}
+	text := string(content)
+
+	// Frontmatter pin: 1.4.0 is the MINOR bump that carries
+	// DE-008's normative carrier change. Bounded by the first
+	// closing --- delimiter so a version string in rule prose
+	// cannot satisfy it.
+	frontmatterEnd := strings.Index(text, "\n---")
+	if frontmatterEnd < 0 {
+		t.Errorf("determinism.md frontmatter missing closing delimiter")
+	} else {
+		version := ""
+		for _, line := range strings.Split(text[:frontmatterEnd], "\n") {
+			if strings.HasPrefix(line, "version:") {
+				version = strings.TrimSpace(strings.TrimPrefix(line, "version:"))
+			}
+		}
+		if version != "1.4.0" {
+			t.Errorf("determinism.md frontmatter version = %q, want 1.4.0", version)
+		}
+	}
+
+	// DE-008 pin: the rule bullet is the structural unit, so
+	// wording in sibling rules cannot satisfy the assertions.
+	// Whitespace is normalized because the pack wraps at 72
+	// columns and the pinned carrier phrase crosses a line wrap.
+	ruleStart := strings.Index(text, "- **DE-008**")
+	if ruleStart < 0 {
+		t.Errorf("determinism.md missing DE-008 rule")
+		return
+	}
+	rule := text[ruleStart:]
+	if end := strings.Index(rule, "\n- **DE-"); end >= 0 {
+		rule = rule[:end]
+	}
+	flatRule := strings.Join(strings.Fields(rule), " ")
+	for _, fragment := range []string{
+		"as spawn-tool parameters",
+		"replicator_forge_spawn_subtask",
+	} {
+		if !strings.Contains(flatRule, fragment) {
+			t.Errorf("determinism.md DE-008 missing %q", fragment)
+		}
+	}
+}
+
+// TestDeterminismFirstSkill_SpawnToolParameters pins the repo-local
+// determinism-first skill's delegation guidance after the
+// spawn-classification parameterization: the "Delegated Work
+// Carries Its Classification" section names the three spawn
+// parameters, and its Swarm-path sentence routes deterministic [P]
+// delegations through the replicator_forge_spawn_subtask call's
+// parameters rather than the subtask description. The skill is
+// repo-local, not an embedded scaffold asset (see
+// knownNonEmbeddedFiles), so it is read from the project root per
+// the findProjectRoot pattern.
+func TestDeterminismFirstSkill_SpawnToolParameters(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Skip("project root not found; skipping determinism-first skill pin")
+	}
+	content, err := os.ReadFile(filepath.Join(root, ".opencode", "skills", "determinism-first", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read determinism-first SKILL.md: %v", err)
+	}
+	text := string(content)
+
+	// Scope to the delegation-guidance section: the Related
+	// Enforcement list also names the parameters and the spawn
+	// tool, so a file-wide contains could not prove the guidance
+	// itself carries them.
+	sectionStart := strings.Index(text, "## Delegated Work Carries Its Classification")
+	if sectionStart < 0 {
+		t.Errorf("determinism-first SKILL.md missing the delegation guidance section")
+		return
+	}
+	section := text[sectionStart:]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
+	flatSection := strings.Join(strings.Fields(section), " ")
+	// Backticked names keep the assertions independent: bare
+	// "skill" would match inside skill_absent_reason.
+	for _, param := range []string{"`task_classification`", "`skill`", "`skill_absent_reason`"} {
+		if !strings.Contains(flatSection, param) {
+			t.Errorf("determinism-first SKILL.md delegation guidance missing %s parameter", param)
+		}
+	}
+
+	// The Swarm-path sentence names the spawn call it routes
+	// through; the span from the sentence to the end of the
+	// section must carry the tool reference.
+	swarmStart := strings.Index(flatSection, "Swarm-path")
+	if swarmStart < 0 {
+		t.Errorf("determinism-first SKILL.md delegation guidance missing the Swarm-path sentence")
+		return
+	}
+	if !strings.Contains(flatSection[swarmStart:], "replicator_forge_spawn_subtask") {
+		t.Errorf("determinism-first SKILL.md Swarm-path sentence missing the replicator_forge_spawn_subtask call")
+	}
+}
+
+// spawnCallBlock extracts the fenced replicator_forge_spawn_subtask
+// call block from a command template, returning the block (opening
+// fence through closing fence) and the text that follows the closing
+// fence. The block is anchored on a line whose trimmed content is
+// exactly the tool name preceded by a bare opening fence:
+// uf_delegate_command call blocks share the fenced shape but name a
+// different tool, and prose mentions of the tool never sit alone on
+// a line, so the anchor stays scoped to the spawn call.
+func spawnCallBlock(t *testing.T, text, label string) (block, rest string) {
+	t.Helper()
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "replicator_forge_spawn_subtask" {
+			continue
+		}
+		if i == 0 || strings.TrimSpace(lines[i-1]) != "```" {
+			continue
+		}
+		for j := i + 1; j < len(lines); j++ {
+			if strings.TrimSpace(lines[j]) == "```" {
+				return strings.Join(lines[i-1:j+1], "\n"),
+					strings.Join(lines[j+1:], "\n")
+			}
+		}
+		t.Fatalf("%s: replicator_forge_spawn_subtask call block has no closing fence", label)
+		return "", ""
+	}
+	t.Fatalf("%s: no fenced replicator_forge_spawn_subtask call block", label)
+	return "", ""
+}
+
+// spawnCallParamLine matches a `name: [value]` parameter line inside
+// a fenced tool call block. Wrapped value continuations never match:
+// the colon must immediately follow the lowercase snake-case name
+// run.
+var spawnCallParamLine = regexp.MustCompile(`^[ \t]*([a-z_]+):`)
+
+// spawnCallBlockParameterNames parses the parameter names a fenced
+// tool call block passes, so tests can pin registration-surface
+// parity (the names the template passes vs. the names the deployed
+// tool's input schema registers) without re-implementing block
+// parsing per test.
+func spawnCallBlockParameterNames(block string) map[string]bool {
+	names := make(map[string]bool)
+	for _, line := range strings.Split(block, "\n") {
+		if m := spawnCallParamLine.FindStringSubmatch(line); m != nil {
+			names[m[1]] = true
+		}
+	}
+	return names
+}
+
+// recordedSpawnSignatureParams parses the parameter names from the
+// forge_spawn_subtask(...) signature the /forge coordination command
+// records -- the repo-local recording of the deployed spawn tool's
+// registered input schema (synced from Replicator with the
+// coordination surface). Alternation (`skill | skill_absent_reason`)
+// and commas both separate parameters.
+func recordedSpawnSignatureParams(t *testing.T, forgeText string) map[string]bool {
+	t.Helper()
+	const anchor = "forge_spawn_subtask("
+	start := strings.Index(forgeText, anchor)
+	if start < 0 {
+		t.Fatalf("forge.md does not record a forge_spawn_subtask signature")
+	}
+	sig := forgeText[start+len(anchor):]
+	if cut := strings.Index(sig, ")"); cut >= 0 {
+		sig = sig[:cut]
+	}
+	params := make(map[string]bool)
+	for _, part := range strings.FieldsFunc(sig, func(r rune) bool {
+		return r == ',' || r == '|'
+	}) {
+		if name := strings.TrimSpace(part); name != "" {
+			params[name] = true
+		}
+	}
+	if len(params) == 0 {
+		t.Fatalf("forge.md forge_spawn_subtask signature parsed to no parameters")
+	}
+	return params
+}
+
+// TestUnleashCommand_SpawnSubtaskSeamVerification is the DE-007 seam
+// verification for the spawn-classification parameterization: a
+// prose-to-tool migration increment must verify, in the same
+// increment, the three seams it creates (registration surface,
+// documented output shape, write-read round-trips). The layers
+// cross-check the surfaces the change writes:
+//
+//   - Registration surface: the fenced replicator_forge_spawn_subtask
+//     call block in the canonical uf.unleash.md names exactly the
+//     deployed tool's delegation parameters -- task_classification,
+//     skill, skill_absent_reason, cross-checked against the /forge
+//     coordination surface's recording of the registered signature --
+//     plus the fields the template already passes, and the mirrored
+//     call block in the embedded asset is byte-identical
+//     (call-block scope; whole-file identity is pinned separately by
+//     TestEmbeddedAssets_MatchSource).
+//   - Documented output shape: the failure codes and validation
+//     rejections the template's enforcement prose names match the
+//     spawn tool's documented contract as recorded in this repo:
+//     SKILL_REFERENCE_REQUIRED, SKILL_NOT_FOUND, and
+//     input-validation rejection of skill fields on
+//     judgment-classified calls.
+//   - Write-read round-trips: the changed surfaces are read back --
+//     the spawn call block canonical <-> mirror here; the
+//     divisor-guard checklist, the determinism pack, and the
+//     determinism-first skill via the sibling spawn-parameter pins
+//     (TestDivisorGuard_DelegationDisciplineSpawnParameters,
+//     TestDeterminismPack_DE008SpawnToolParameters,
+//     TestDeterminismFirstSkill_SpawnToolParameters) -- and the
+//     drift infrastructure keeps covering them (embedded mirrors
+//     through the TestEmbeddedAssets_MatchSource asset set,
+//     repo-local governance files through knownNonEmbeddedFiles).
+func TestUnleashCommand_SpawnSubtaskSeamVerification(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Fatalf("project root not found; cannot verify the spawn subtask seams")
+	}
+
+	canonical, err := os.ReadFile(filepath.Join(root, ".opencode", "commands", "uf.unleash.md"))
+	if err != nil {
+		t.Fatalf("read canonical uf.unleash.md: %v", err)
+	}
+	mirror, err := assetContent("opencode/commands/uf.unleash.md")
+	if err != nil {
+		t.Fatalf("read embedded uf.unleash.md: %v", err)
+	}
+	// The /forge coordination command is the repo-local recording of
+	// the deployed spawn tool's registered input schema and
+	// documented contract (synced from Replicator); both the
+	// registration-surface and output-shape layers check against it.
+	forgeCmd, err := os.ReadFile(filepath.Join(root, ".opencode", "commands", "forge.md"))
+	if err != nil {
+		t.Fatalf("read forge.md: %v", err)
+	}
+
+	canonicalBlock, canonicalRest := spawnCallBlock(t, string(canonical), "canonical uf.unleash.md")
+	mirrorBlock, _ := spawnCallBlock(t, string(mirror), "embedded mirror uf.unleash.md")
+
+	t.Run("registration surface: spawn call block matches the deployed schema", func(t *testing.T) {
+		// Call-block-level drift check: the mirrored block must be
+		// byte-identical to the canonical one. Scoped to the fenced
+		// block because whole-file identity is already pinned by
+		// TestEmbeddedAssets_MatchSource; this pin keeps drift in
+		// the block that carries the classification contract
+		// visible at the seam itself.
+		if canonicalBlock != mirrorBlock {
+			t.Error("embedded mirror's replicator_forge_spawn_subtask call block differs from the canonical one")
+		}
+
+		// Input-schema parity, template side: the block names
+		// exactly the deployed tool's delegation parameters plus
+		// the fields the template already passes -- no missing,
+		// renamed, or extra parameters. The template deliberately
+		// does not enumerate the tool's full schema (bead_id,
+		// epic_id, subtask_title, shared_context belong to the
+		// coordination tooling), so the pin covers the delegation
+		// contract, not the whole registration. The deployed tool
+		// validates required inputs fail-closed at spawn time, so
+		// a misparameterized call block must break here first.
+		got := spawnCallBlockParameterNames(canonicalBlock)
+		want := map[string]bool{
+			"subtask_description": true,
+			"task_classification": true,
+			"skill":               true,
+			"skill_absent_reason": true,
+			"files":               true,
+			"project_path":        true,
+		}
+		var missing, unexpected []string
+		for name := range want {
+			if !got[name] {
+				missing = append(missing, name)
+			}
+		}
+		for name := range got {
+			if !want[name] {
+				unexpected = append(unexpected, name)
+			}
+		}
+		if len(missing) > 0 || len(unexpected) > 0 {
+			sort.Strings(missing)
+			sort.Strings(unexpected)
+			t.Errorf("canonical spawn call block parameter drift: missing %v, unexpected %v "+
+				"(want exactly subtask_description, task_classification, skill, "+
+				"skill_absent_reason, files, project_path)", missing, unexpected)
+		}
+
+		// Input-schema parity, recorded-schema side: each
+		// classification parameter the template passes must be a
+		// name the repo-local recording of the registered
+		// signature knows. A Replicator schema rename synced into
+		// the coordination surface fails here instead of breaking
+		// the template's spawn calls at runtime.
+		sigParams := recordedSpawnSignatureParams(t, string(forgeCmd))
+		for _, param := range []string{"task_classification", "skill", "skill_absent_reason"} {
+			if !sigParams[param] {
+				t.Errorf("forge.md spawn signature does not record the %s parameter the template passes", param)
+			}
+		}
+	})
+
+	t.Run("documented output shape: enforcement prose matches the recorded contract", func(t *testing.T) {
+		// Scope to the enforcement prose that follows the spawn
+		// call block (up to the next parallel-execution item), so
+		// failure codes named elsewhere in the template cannot
+		// satisfy the pin. Whitespace is normalized because the
+		// template wraps at 72 columns and the pinned clauses
+		// cross line wraps.
+		cut := strings.Index(canonicalRest, "d. Wait for all workers")
+		if cut < 0 {
+			t.Fatalf("canonical uf.unleash.md: spawn enforcement prose is not bounded by " +
+				"the parallel-execution wait item")
+		}
+		flatProse := strings.Join(strings.Fields(canonicalRest[:cut]), " ")
+		for _, fragment := range []string{
+			"fails with `SKILL_REFERENCE_REQUIRED`",
+			"fails with `SKILL_NOT_FOUND`",
+			"a judgment-classified call supplying either skill field fails input validation",
+		} {
+			if !strings.Contains(flatProse, fragment) {
+				t.Errorf("spawn enforcement prose missing documented-contract clause %q", fragment)
+			}
+		}
+
+		// The codes and rejections the template names must be the
+		// ones the repo-local recording of the spawn tool's
+		// documented contract records -- a code renamed on either
+		// surface breaks the seam here, not in a spawned worker's
+		// error handling.
+		flatForge := strings.Join(strings.Fields(string(forgeCmd)), " ")
+		for _, fragment := range []string{
+			"`SKILL_REFERENCE_REQUIRED`",
+			"`SKILL_NOT_FOUND`",
+			"supplying either fails input validation",
+		} {
+			if !strings.Contains(flatForge, fragment) {
+				t.Errorf("forge.md spawn contract recording missing %q "+
+					"(template and recording disagree on the documented output shape)", fragment)
+			}
+		}
+	})
+
+	t.Run("round trips: changed surfaces stay under drift coverage", func(t *testing.T) {
+		// The drift test round-trips canonical -> mirror for the
+		// embedded assets this change writes: both must remain in
+		// the asset set TestEmbeddedAssets_MatchSource iterates.
+		// The call-block identity asserted above is the
+		// block-scoped slice of that round trip, not a replacement
+		// for the whole-file check.
+		paths, err := assetPaths()
+		if err != nil {
+			t.Fatalf("list embedded assets: %v", err)
+		}
+		embedded := make(map[string]bool, len(paths))
+		for _, rel := range paths {
+			embedded[rel] = true
+		}
+		for _, rel := range []string{
+			"opencode/commands/uf.unleash.md",
+			"opencode/agents/divisor-guard.md",
+		} {
+			if !embedded[rel] {
+				t.Errorf("%s is no longer an embedded asset; TestEmbeddedAssets_MatchSource "+
+					"would stop round-tripping this change's canonical -> mirror drift check", rel)
+			}
+		}
+
+		// The repo-local governance files this change writes are
+		// intentionally unmirrored; they must stay in
+		// knownNonEmbeddedFiles so TestCanonicalSources_AreEmbedded
+		// keeps treating them as covered by the repo-local pin
+		// tests rather than silently unembedded. Their content is
+		// read back by the sibling spawn-parameter pins, not
+		// duplicated here.
+		for _, rel := range []string{
+			".opencode/uf/packs/determinism.md",
+			".opencode/skills/determinism-first/SKILL.md",
+		} {
+			if !knownNonEmbeddedFiles[rel] {
+				t.Errorf("%s is not in knownNonEmbeddedFiles; TestCanonicalSources_AreEmbedded "+
+					"would demand an embedded mirror for this repo-local governance file", rel)
+			}
+		}
+	})
+}
+
 // TestRun_LegacyFileWarning verifies that uf init warns about
 // previously scaffolded reviewer-*.md files per Spec 019 FR-003a.
 func TestRun_LegacyFileWarning(t *testing.T) {
@@ -2090,7 +4581,7 @@ func TestRun_LegacyFileWarning(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	_, err := Run(Options{
+	_, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -2130,7 +4621,7 @@ func TestRun_DoesNotCreateBridgeFiles(t *testing.T) {
 	dir := t.TempDir()
 	var buf bytes.Buffer
 
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -2183,7 +4674,7 @@ func TestRun_DoesNotModifyExistingBridgeFiles(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	result, err := Run(Options{
+	result, err := runScaffoldWithoutExternalTools(t, Options{
 		TargetDir: dir,
 		Version:   "1.0.0-test",
 		Stdout:    &buf,
@@ -3345,6 +5836,48 @@ func TestConfigureOpencodeJSON_LegacyPluginMigration_OtherPlugins(t *testing.T) 
 	}
 }
 
+func TestConfigureOpencodeJSON_RegistersReviewPlugins(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create the managed review plugin sources.
+	for _, assetPath := range []string{invokeAgentPluginAsset, reviewDispatchPluginAsset, ufWorkflowPluginAsset, ufFinalePluginAsset} {
+		targetPath := filepath.Join(dir, mapAssetPath(assetPath))
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			t.Fatalf("mkdir plugin dir: %v", err)
+		}
+		if err := os.WriteFile(targetPath, []byte("// plugin source\n"), 0o644); err != nil {
+			t.Fatalf("write plugin source: %v", err)
+		}
+	}
+
+	opts := &Options{
+		TargetDir: dir,
+		LookPath:  stubScaffoldLookPath(map[string]string{}),
+	}
+
+	results := configureOpencodeJSON(opts)
+	if results[0].action != "created" {
+		t.Errorf("expected action 'created', got %q", results[0].action)
+	}
+
+	ocMap := parseOpencodeJSON(t, dir)
+	gotPlugins := getPlugins(t, ocMap)
+	wantPlugins := []string{
+		"./" + mapAssetPath(invokeAgentPluginAsset),
+		"./" + mapAssetPath(reviewDispatchPluginAsset),
+		"./" + mapAssetPath(ufWorkflowPluginAsset),
+		"./" + mapAssetPath(ufFinalePluginAsset),
+	}
+	if len(gotPlugins) != len(wantPlugins) {
+		t.Fatalf("plugin = %v, want %v", gotPlugins, wantPlugins)
+	}
+	for i := range wantPlugins {
+		if gotPlugins[i] != wantPlugins[i] {
+			t.Errorf("plugin[%d] = %q, want %q", i, gotPlugins[i], wantPlugins[i])
+		}
+	}
+}
+
 func TestConfigureOpencodeJSON_ReplicatorNotInstalled(t *testing.T) {
 	dir := t.TempDir()
 
@@ -4370,7 +6903,7 @@ func TestInitSubTools_ConcurrentAllResults(t *testing.T) {
 
 	expectedCmds := []string{
 		"dewey init", "dewey index --no-embeddings",
-		"replicator init", "specify init --here --integration opencode --offline",
+		"replicator init", "specify init --here --integration opencode --offline --force",
 		"openspec init --tools opencode", "gaze init",
 	}
 	for _, cmd := range expectedCmds {
@@ -4644,7 +7177,8 @@ func TestInitSubTools_ReplicatorInit(t *testing.T) {
 
 func TestInitSubTools_ReplicatorInitSkipsExisting(t *testing.T) {
 	dir := t.TempDir()
-	// Create .uf/replicator/ — should skip replicator init.
+	// Create .uf/replicator/ — should skip replicator init with a
+	// visible "already configured" result.
 	if err := os.MkdirAll(filepath.Join(dir, ".uf", "replicator"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -4658,11 +7192,15 @@ func TestInitSubTools_ReplicatorInitSkipsExisting(t *testing.T) {
 
 	results := initSubTools(opts)
 
-	// Should NOT have .uf/replicator/ result.
+	// Should have a visible .uf/replicator/ "already configured" result.
+	foundSkipped := false
 	for _, r := range results {
-		if r.name == ".uf/replicator/" {
-			t.Errorf("unexpected .uf/replicator/ result when already exists: %s %s", r.name, r.action)
+		if r.name == ".uf/replicator/" && r.action == "already configured" {
+			foundSkipped = true
 		}
+	}
+	if !foundSkipped {
+		t.Errorf("expected .uf/replicator/ already configured, got %v", results)
 	}
 
 	// Verify replicator init was NOT called.
@@ -4739,19 +7277,20 @@ func TestInitSubTools_SpecifyInit(t *testing.T) {
 
 	found := false
 	for _, call := range rec.calls {
-		if call == "specify init --here --integration opencode --offline" {
+		if call == "specify init --here --integration opencode --offline --force" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected 'specify init --here --integration opencode --offline' call, got: %v", rec.calls)
+		t.Errorf("expected 'specify init --here --integration opencode --offline --force' call, got: %v", rec.calls)
 	}
 }
 
 func TestInitSubTools_SpecifySkipped(t *testing.T) {
 	dir := t.TempDir()
-	// Create .specify/ — should skip specify init.
-	if err := os.MkdirAll(filepath.Join(dir, ".specify"), 0o755); err != nil {
+	// Create .specify/scripts sentinel — specify init should be
+	// skipped with a visible "already configured" result.
+	if err := os.MkdirAll(filepath.Join(dir, ".specify", "scripts"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	rec := &scaffoldCmdRecorder{errors: map[string]error{}}
@@ -4764,14 +7303,18 @@ func TestInitSubTools_SpecifySkipped(t *testing.T) {
 
 	results := initSubTools(opts)
 
+	foundSkipped := false
 	for _, r := range results {
-		if r.name == ".specify/" {
-			t.Errorf("unexpected .specify/ result when already exists: %s %s", r.name, r.action)
+		if r.name == ".specify/" && r.action == "already configured" {
+			foundSkipped = true
 		}
+	}
+	if !foundSkipped {
+		t.Errorf("expected .specify/ already configured, got %v", results)
 	}
 
 	for _, call := range rec.calls {
-		if call == "specify init --here --integration opencode --offline" {
+		if call == "specify init --here --integration opencode --offline --force" {
 			t.Error("specify init should NOT be called when .specify/ exists")
 		}
 	}
@@ -4800,7 +7343,7 @@ func TestInitSubTools_SpecifyFailed(t *testing.T) {
 	dir := t.TempDir()
 	rec := &scaffoldCmdRecorder{
 		errors: map[string]error{
-			"specify init --here --integration opencode --offline": fmt.Errorf("init failed"),
+			"specify init --here --integration opencode --offline --force": fmt.Errorf("init failed"),
 		},
 	}
 
@@ -4820,6 +7363,49 @@ func TestInitSubTools_SpecifyFailed(t *testing.T) {
 	}
 	if !foundFailed {
 		t.Errorf("expected .specify/ failed, got %v", results)
+	}
+}
+
+// TestSimpleToolsSentinelsNotScaffolded pins the sentinel-integrity
+// invariant between the embedded asset walk and the simpleTools
+// table: no embedded asset may map (via mapAssetPath) to a target
+// path that equals or is a descendant of any tool's sentinel. The
+// original bug was exactly such a collision — the starter
+// constitution (assets/specify/memory/constitution.md) mapped under
+// the old bare-.specify sentinel, so Run()'s asset walk created the
+// sentinel and suppressed `specify init` on every fresh run. All
+// four current sentinels are clear; this guard fails CI the moment
+// a future embedded asset recreates the bug's precondition, for any
+// table entry — including tools added later. (D4; FR-020)
+func TestSimpleToolsSentinelsNotScaffolded(t *testing.T) {
+	// Mirror Run()'s walk (fs.WalkDir over the embedded FS,
+	// skipping directories and stripping the assets/ prefix) so
+	// the guard enumerates exactly the paths Run() can scaffold.
+	err := fs.WalkDir(assets, "assets", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		relPath := strings.TrimPrefix(path, "assets/")
+		target := mapAssetPath(relPath)
+		for _, tool := range simpleTools {
+			// mapAssetPath builds targets from embedded FS paths,
+			// which are always slash-separated, while sentinels
+			// use filepath.Join; normalize the sentinel so the
+			// guard cannot silently pass on Windows-style
+			// separators.
+			sentinel := filepath.ToSlash(tool.sentinel)
+			if target == sentinel || strings.HasPrefix(target, sentinel+"/") {
+				t.Errorf("embedded asset %q maps to %q, which equals or is a descendant of the %s sentinel %q; scaffolding it would suppress %s init",
+					relPath, target, tool.name, sentinel, tool.name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk embedded assets: %v", err)
 	}
 }
 
@@ -4865,7 +7451,8 @@ func TestInitSubTools_OpenSpecInit(t *testing.T) {
 
 func TestInitSubTools_OpenSpecSkipped(t *testing.T) {
 	dir := t.TempDir()
-	// Create openspec/config.yaml — should skip openspec init.
+	// Create openspec/config.yaml — should skip openspec init with
+	// a visible "already configured" result.
 	if err := os.MkdirAll(filepath.Join(dir, "openspec"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -4882,10 +7469,15 @@ func TestInitSubTools_OpenSpecSkipped(t *testing.T) {
 
 	results := initSubTools(opts)
 
+	// Should have a visible openspec/ "already configured" result.
+	foundSkipped := false
 	for _, r := range results {
-		if r.name == "openspec/" {
-			t.Errorf("unexpected openspec/ result when config exists: %s %s", r.name, r.action)
+		if r.name == "openspec/" && r.action == "already configured" {
+			foundSkipped = true
 		}
+	}
+	if !foundSkipped {
+		t.Errorf("expected openspec/ already configured, got %v", results)
 	}
 
 	for _, call := range rec.calls {
@@ -4963,7 +7555,8 @@ func TestInitSubTools_GazeInit(t *testing.T) {
 
 func TestInitSubTools_GazeSkipped(t *testing.T) {
 	dir := t.TempDir()
-	// Create gaze-reporter.md — should skip gaze init.
+	// Create gaze-reporter.md — should skip gaze init with a visible
+	// "already configured" result.
 	agentDir := filepath.Join(dir, ".opencode", "agents")
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -4981,10 +7574,15 @@ func TestInitSubTools_GazeSkipped(t *testing.T) {
 
 	results := initSubTools(opts)
 
+	// Should have a visible gaze "already configured" result.
+	foundSkipped := false
 	for _, r := range results {
-		if r.name == "gaze" {
-			t.Errorf("unexpected gaze result when agent exists: %s %s", r.name, r.action)
+		if r.name == "gaze" && r.action == "already configured" {
+			foundSkipped = true
 		}
+	}
+	if !foundSkipped {
+		t.Errorf("expected gaze already configured, got %v", results)
 	}
 
 	for _, call := range rec.calls {
@@ -5057,18 +7655,13 @@ func TestEnsureGitignore_FreshDir(t *testing.T) {
 	}
 	// Verify representative patterns from each section.
 	for _, pattern := range []string{
-		".uf/workflows/",
 		".uf/dewey/graph.db",
 		".uf/dewey/cache/",
 		".uf/replicator/*.db",
-		".uf/muti-mind/artifacts/",
-		".uf/mx-f/data/",
 		".devcontainer/",
 		".dewey/",
 		".hive/",
 		".unbound-force/",
-		".muti-mind/",
-		".mx-f/",
 	} {
 		if !strings.Contains(text, pattern) {
 			t.Errorf("expected pattern %q in .gitignore", pattern)
@@ -5362,15 +7955,17 @@ func TestCollectDeployedPacks_Go(t *testing.T) {
 	packs := collectDeployedPacks("go", "")
 
 	expected := map[string]bool{
-		"default.md":        true,
-		"default-custom.md": true,
-		"severity.md":       true,
-		"content.md":        true,
-		"content-custom.md": true,
-		"ci.md":             true,
-		"ci-custom.md":      true,
-		"go.md":             true,
-		"go-custom.md":      true,
+		"default.md":             true,
+		"default-custom.md":      true,
+		"severity.md":            true,
+		"content.md":             true,
+		"content-custom.md":      true,
+		"ci.md":                  true,
+		"ci-custom.md":           true,
+		"review-voice.md":        true,
+		"review-voice-custom.md": true,
+		"go.md":                  true,
+		"go-custom.md":           true,
 	}
 
 	if len(packs) != len(expected) {
@@ -5386,14 +7981,15 @@ func TestCollectDeployedPacks_Go(t *testing.T) {
 func TestCollectDeployedPacks_TypeScript(t *testing.T) {
 	packs := collectDeployedPacks("typescript", "")
 
-	found := false
+	required := []string{"typescript.md", "review-voice.md", "review-voice-custom.md"}
+	packSet := make(map[string]bool, len(packs))
 	for _, p := range packs {
-		if p == "typescript.md" {
-			found = true
-		}
+		packSet[p] = true
 	}
-	if !found {
-		t.Error("expected typescript.md in packs")
+	for _, r := range required {
+		if !packSet[r] {
+			t.Errorf("expected %q in packs", r)
+		}
 	}
 }
 
@@ -5404,13 +8000,14 @@ func TestCollectDeployedPacks_Default(t *testing.T) {
 		if p == "default.md" || p == "default-custom.md" ||
 			p == "severity.md" || p == "content.md" ||
 			p == "content-custom.md" || p == "ci.md" ||
-			p == "ci-custom.md" {
+			p == "ci-custom.md" || p == "review-voice.md" ||
+			p == "review-voice-custom.md" {
 			continue
 		}
 		t.Errorf("unexpected pack %q for default lang", p)
 	}
-	if len(packs) != 7 {
-		t.Errorf("expected 7 packs for default lang, got %d", len(packs))
+	if len(packs) != 9 {
+		t.Errorf("expected 9 packs for default lang, got %d", len(packs))
 	}
 }
 
@@ -5511,7 +8108,7 @@ func TestCollectDeployedPacks_WithRoot_AllEmpty(t *testing.T) {
 	}
 
 	sentinel := "<!-- Add project-specific rules below this line -->"
-	stubs := []string{"default-custom.md", "content-custom.md", "ci-custom.md", "go-custom.md"}
+	stubs := []string{"default-custom.md", "content-custom.md", "ci-custom.md", "go-custom.md", "review-voice-custom.md"}
 	for _, name := range stubs {
 		if err := os.WriteFile(filepath.Join(packsDir, name), []byte(sentinel), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
@@ -5526,7 +8123,7 @@ func TestCollectDeployedPacks_WithRoot_AllEmpty(t *testing.T) {
 		}
 	}
 	// Non-custom packs must still be present.
-	required := []string{"default.md", "severity.md", "content.md", "ci.md", "go.md"}
+	required := []string{"default.md", "severity.md", "content.md", "ci.md", "go.md", "review-voice.md"}
 	packSet := make(map[string]bool, len(packs))
 	for _, p := range packs {
 		packSet[p] = true
@@ -5546,8 +8143,9 @@ func TestCollectDeployedPacks_WithRoot_OnePopulated(t *testing.T) {
 	}
 
 	sentinel := "<!-- Add project-specific rules below this line -->"
-	// default-custom, content-custom, and ci-custom are empty stubs.
-	for _, name := range []string{"default-custom.md", "content-custom.md", "ci-custom.md"} {
+	// default-custom, content-custom, ci-custom, and review-voice-custom
+	// are empty stubs.
+	for _, name := range []string{"default-custom.md", "content-custom.md", "ci-custom.md", "review-voice-custom.md"} {
 		if err := os.WriteFile(filepath.Join(packsDir, name), []byte(sentinel), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
@@ -5576,6 +8174,9 @@ func TestCollectDeployedPacks_WithRoot_OnePopulated(t *testing.T) {
 	if packSet["ci-custom.md"] {
 		t.Error("ci-custom.md should be excluded (empty)")
 	}
+	if packSet["review-voice-custom.md"] {
+		t.Error("review-voice-custom.md should be excluded (empty)")
+	}
 }
 
 func TestCollectDeployedPacks_WithRoot_EmptyRootFallback(t *testing.T) {
@@ -5587,7 +8188,7 @@ func TestCollectDeployedPacks_WithRoot_EmptyRootFallback(t *testing.T) {
 	for _, p := range packs {
 		packSet[p] = true
 	}
-	for _, name := range []string{"default-custom.md", "content-custom.md", "ci-custom.md", "go-custom.md"} {
+	for _, name := range []string{"default-custom.md", "content-custom.md", "ci-custom.md", "go-custom.md", "review-voice-custom.md"} {
 		if !packSet[name] {
 			t.Errorf("expected %q in packs when root is empty, got: %v", name, packs)
 		}
@@ -6451,10 +9052,10 @@ func TestInitSubTools_SimpleToolFails_ShowsError(t *testing.T) {
 	dir := t.TempDir()
 	rec := &scaffoldCmdRecorder{
 		errors: map[string]error{
-			"specify init --here --integration opencode --offline": fmt.Errorf("exit status 1"),
+			"specify init --here --integration opencode --offline --force": fmt.Errorf("exit status 1"),
 		},
 		outputs: map[string]string{
-			"specify init --here --integration opencode --offline": "Error: .specify already exists\nUse --force to overwrite.\n",
+			"specify init --here --integration opencode --offline --force": "Error: .specify already exists\nUse --force to overwrite.\n",
 		},
 	}
 
@@ -6603,8 +9204,8 @@ func TestGuardrailTemplates_CommandSpecificContent(t *testing.T) {
 	// The blocks are fenced in ```markdown ... ``` and preceded by
 	// a bold label like **Implement guardrails block**.
 	type guardrailBlock struct {
-		label        string
-		mustContain  []string
+		label          string
+		mustContain    []string
 		mustNotContain []string
 	}
 
@@ -6637,6 +9238,8 @@ func TestGuardrailTemplates_CommandSpecificContent(t *testing.T) {
 			mustContain: []string{
 				"GitHub issues via",
 				"the current Git remote",
+				"Content portability", // issue #593
+				"CP-001",              // issue #593
 			},
 			mustNotContain: []string{
 				"NEVER modify source code",
@@ -7149,6 +9752,67 @@ func TestWarnStaleCommandRefs_ProjectAGENTSmdHasNoStaleRefs(t *testing.T) {
 	}
 }
 
+// TestSkillTemplates_NoStaleCommandRefs is a drift-detection test
+// that walks every .md file under internal/scaffold/assets/opencode/
+// skills/ and commands/ and asserts that zero stale (pre-namespace-
+// prefix) command references remain. It uses the same word-boundary-
+// anchored matching as warnStaleCommandRefs so that already-migrated
+// references (e.g. /uf.review-council) are not falsely counted as
+// stale.
+func TestSkillTemplates_NoStaleCommandRefs(t *testing.T) {
+	projectRoot := findProjectRoot(t)
+	if projectRoot == "" {
+		t.Skip("could not locate project root (no go.mod found)")
+	}
+
+	dirs := []string{
+		filepath.Join(projectRoot, "internal", "scaffold", "assets", "opencode", "skills"),
+		filepath.Join(projectRoot, "internal", "scaffold", "assets", "opencode", "commands"),
+	}
+
+	var files []string
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() && strings.HasSuffix(path, ".md") {
+				files = append(files, path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	if len(files) == 0 {
+		t.Skip("no .md files found under skills or commands directories")
+	}
+
+	for _, f := range files {
+		data, readErr := os.ReadFile(f)
+		if readErr != nil {
+			t.Fatalf("read %s: %v", f, readErr)
+		}
+		content := string(data)
+		relPath, _ := filepath.Rel(projectRoot, f)
+
+		for oldRel, newRel := range renamedCommands {
+			staleRef := "/" + strings.TrimSuffix(filepath.Base(oldRel), ".md")
+			newRef := "/" + strings.TrimSuffix(filepath.Base(newRel), ".md")
+
+			pat := "(^|[^.a-zA-Z0-9_-])" + regexp.QuoteMeta(staleRef) + "($|[^a-zA-Z0-9_-])"
+			re := regexp.MustCompile(pat)
+			if re.MatchString(content) {
+				t.Errorf("%s contains stale command reference %s (should be %s)", relPath, staleRef, newRef)
+			}
+		}
+	}
+}
+
 // --- initSimpleTool force re-init tests ---
 
 func TestInitSimpleTool_SentinelExistsForceTrue(t *testing.T) {
@@ -7217,8 +9881,14 @@ func TestInitSimpleTool_SentinelExistsNoForce(t *testing.T) {
 	logf := func(string, ...interface{}) {}
 
 	r := initSimpleTool(opts, tool, logf)
-	if r != nil {
-		t.Errorf("expected nil result when Force=false and sentinel exists, got %+v", r)
+	if r == nil {
+		t.Fatal("expected non-nil result when Force=false and sentinel exists")
+	}
+	if r.name != ".specify/" {
+		t.Errorf("expected name %q, got %q", ".specify/", r.name)
+	}
+	if r.action != "already configured" {
+		t.Errorf("expected action %q, got %q", "already configured", r.action)
 	}
 
 	// Verify ExecCmd was NOT called.
@@ -7322,8 +9992,8 @@ func TestInitSimpleTool_NoForceFlagDeclared(t *testing.T) {
 
 func TestInitSubTools_SpecifyForcePassthrough(t *testing.T) {
 	dir := t.TempDir()
-	// Create .specify/ so sentinel exists — force should re-init.
-	if err := os.MkdirAll(filepath.Join(dir, ".specify"), 0o755); err != nil {
+	// Create .specify/scripts sentinel — force should re-init.
+	if err := os.MkdirAll(filepath.Join(dir, ".specify", "scripts"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
@@ -7359,11 +10029,22 @@ func TestInitSubTools_SpecifyForcePassthrough(t *testing.T) {
 	if !found {
 		t.Errorf("expected call %q, got: %v", expected, rec.calls)
 	}
+
+	// FR-014: --force is supplied by the base args (specify's
+	// forceFlag is empty), so the recorded args must contain exactly
+	// one --force — a repopulated forceFlag would duplicate it.
+	for _, call := range rec.calls {
+		if strings.HasPrefix(call, "specify init") {
+			if n := strings.Count(call, "--force"); n != 1 {
+				t.Errorf("expected exactly one --force in specify invocation, got %d: %s", n, call)
+			}
+		}
+	}
 }
 
 func TestInitSimpleTool_ForceReinitFails(t *testing.T) {
 	dir := t.TempDir()
-	sentinel := filepath.Join(dir, ".specify")
+	sentinel := filepath.Join(dir, ".specify", "scripts")
 	if err := os.MkdirAll(sentinel, 0o755); err != nil {
 		t.Fatalf("mkdir sentinel: %v", err)
 	}
@@ -7380,13 +10061,22 @@ func TestInitSimpleTool_ForceReinitFails(t *testing.T) {
 		ExecCmd:   rec.execCmd,
 	}
 
-	tool := simpleTool{
-		name:      "specify",
-		sentinel:  ".specify",
-		result:    ".specify/",
-		label:     "Speckit framework",
-		args:      []string{"--here", "--integration", "opencode", "--offline"},
-		forceFlag: "--force",
+	// Look up the real specify entry from the package-level
+	// simpleTools table (FR-014) so the failure path is exercised
+	// against the actual table shape — sentinel .specify/scripts,
+	// --force in the base args, empty forceFlag — rather than a
+	// stale inline copy that can silently diverge from the table.
+	tool := simpleTool{}
+	found := false
+	for _, entry := range simpleTools {
+		if entry.name == "specify" {
+			tool = entry
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("specify entry not found in simpleTools table")
 	}
 	logf := func(string, ...interface{}) {}
 
@@ -7449,5 +10139,177 @@ func TestInitSimpleTool_NoSentinelForceTrue(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected call %q, got: %v", expected, rec.calls)
+	}
+}
+
+// TestContentPortability_DefaultPack verifies that the default
+// convention pack contains Content Portability rules (CP-001
+// through CP-003) that prevent LLM-generated issue content from
+// using org-config-specific terminology for non-org-config repos.
+// Regression guard for issue #593.
+func TestContentPortability_DefaultPack(t *testing.T) {
+	content, err := assetContent("opencode/uf/packs/default.md")
+	if err != nil {
+		t.Fatalf("read embedded default.md: %v", err)
+	}
+	text := string(content)
+
+	requiredMarkers := []string{
+		"## Content Portability",
+		"CP-001",
+		"CP-002",
+		"CP-003",
+		"organization-configuration repository",
+		"Peribolos",
+		"safe-settings",
+	}
+
+	for _, marker := range requiredMarkers {
+		if !strings.Contains(text, marker) {
+			t.Errorf("default.md MUST contain %q (content portability guardrail from issue #593)", marker)
+		}
+	}
+}
+
+// TestContentPortability_TriageIssueCommand verifies that the
+// triage-issue command contains a content portability guardrail
+// in the child issue creation section (Phase 4.4).
+// Regression guard for issue #593.
+func TestContentPortability_TriageIssueCommand(t *testing.T) {
+	content, err := assetContent("opencode/commands/uf.triage-issue.md")
+	if err != nil {
+		t.Fatalf("read embedded uf.triage-issue.md: %v", err)
+	}
+	text := string(content)
+
+	// The content portability block must appear in the child
+	// issue creation section (4.4), not elsewhere.
+	idx := strings.Index(text, "### 4.4 Child Issue Creation")
+	if idx < 0 {
+		t.Fatal("section '### 4.4 Child Issue Creation' not found")
+	}
+
+	section := text[idx:]
+	requiredPhrases := []string{
+		"Content portability",
+		"CP-001",
+	}
+
+	for _, phrase := range requiredPhrases {
+		if !strings.Contains(section, phrase) {
+			t.Errorf("triage-issue.md section 4.4 MUST contain %q (content portability guardrail from issue #593)", phrase)
+		}
+	}
+}
+
+// TestContentPortability_TasksToIssuesCommand verifies that the
+// speckit.taskstoissues command contains a content portability
+// guardrail. This file is not an embedded scaffold asset, so it
+// must be tested via filesystem read (os.ReadFile) rather than
+// assetContent(). Regression guard for issue #593.
+func TestContentPortability_TasksToIssuesCommand(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Skip("project root not found; skipping filesystem test")
+	}
+
+	path := filepath.Join(root, ".opencode", "commands", "speckit.taskstoissues.md")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read speckit.taskstoissues.md: %v", err)
+	}
+	text := string(content)
+
+	requiredPhrases := []string{
+		"Content portability",
+		"CP-001",
+	}
+
+	for _, phrase := range requiredPhrases {
+		if !strings.Contains(text, phrase) {
+			t.Errorf("speckit.taskstoissues.md MUST contain %q (content portability guardrail from issue #593)", phrase)
+		}
+	}
+}
+
+// TestContentPortability_CuratorAgent verifies that the
+// divisor-curator agent contains a Content Portability section
+// in its audit checklist. Regression guard for issue #593.
+func TestContentPortability_CuratorAgent(t *testing.T) {
+	content, err := assetContent("opencode/agents/divisor-curator.md")
+	if err != nil {
+		t.Fatalf("read embedded divisor-curator.md: %v", err)
+	}
+	text := string(content)
+
+	if !strings.Contains(text, "#### 4. Content Portability") {
+		t.Error("divisor-curator.md MUST contain '#### 4. Content Portability' section (issue #593)")
+	}
+	if !strings.Contains(text, "CP-001") {
+		t.Error("divisor-curator.md MUST reference CP-001 (issue #593)")
+	}
+}
+
+// TestNoObsoleteToolNames verifies that .opencode/ files do not
+// contain obsolete Swarm/SwarmMail tool names that were renamed
+// in Replicator. Regression guard for issue #617.
+func TestNoObsoleteToolNames(t *testing.T) {
+	root := findProjectRoot(t)
+	if root == "" {
+		t.Skip("project root not found; skipping obsolete tool name check")
+	}
+
+	// Obsolete tool name patterns (function-call style with
+	// underscore, not general prose usage of "swarm").
+	obsoletePatterns := []string{
+		"swarm_spawn_subtask",
+		"swarm_complete",
+		"swarm_progress",
+		"swarm_status",
+		"swarm_worktree_list",
+		"swarm_worktree_cleanup",
+		"swarm_worktree_create",
+		"swarm_worktree_merge",
+		"swarmmail_reserve",
+	}
+
+	// Walk both the canonical .opencode/ directory and the
+	// embedded scaffold mirror to catch obsolete tool names
+	// in either location.
+	dirs := []string{
+		filepath.Join(root, ".opencode"),
+		filepath.Join(root, "internal", "scaffold", "assets", "opencode"),
+	}
+	for _, dir := range dirs {
+		dirLabel, _ := filepath.Rel(root, dir)
+		err := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil || info.IsDir() {
+				return walkErr
+			}
+			if filepath.Ext(path) != ".md" {
+				return nil
+			}
+
+			content, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Errorf("read %s: %v", path, readErr)
+				return nil
+			}
+
+			relPath, _ := filepath.Rel(root, path)
+			lines := strings.Split(string(content), "\n")
+			for i, line := range lines {
+				for _, pattern := range obsoletePatterns {
+					if strings.Contains(line, pattern) {
+						t.Errorf("%s:%d: obsolete tool name %q (issue #617)\n  line: %s",
+							relPath, i+1, pattern, strings.TrimSpace(line))
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dirLabel, err)
+		}
 	}
 }

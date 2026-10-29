@@ -11,8 +11,8 @@ the org-level constitution, the architectural specs for all
 heroes, and the shared standards that every hero repo must follow.
 
 - **Type**: Meta repository (specifications, governance, standards)
-- **Heroes**: Muti-Mind (PO), Cobalt-Crush (Dev), Gaze (Tester),
-  The Divisor (Reviewer), Mx F (Manager) -- all implemented
+- **Heroes**: Cobalt-Crush (Dev), Gaze (Tester),
+  The Divisor (Reviewer) -- all implemented
 - **Tooling**: [Speckit](https://github.com/github/spec-kit) +
   [OpenCode](https://opencode.ai) +
   [Replicator](https://github.com/unbound-force/replicator)
@@ -36,13 +36,22 @@ make build
 make test
 # or: go test -race -count=1 ./...
 
-# Run all checks (lint, test, build)
+# Run all checks (lint, test, build, coverage gate, plugin tests)
 make check
+
+# TypeScript plugin tests (unit, integration, smoke, coverage)
+make plugin-test
+
+# Scope-based Go coverage gate (changed packages)
+make coverage-gate
 
 # Lint (vet + golangci-lint)
 make lint
 # or: go vet ./... && golangci-lint run
 ```
+
+`make check` now depends on both `make coverage-gate` (scope-based Go
+coverage) and `make plugin-test` (TypeScript plugin suite).
 
 Always run tests with `-race -count=1`. CI enforces this.
 
@@ -50,7 +59,7 @@ Always run tests with `-race -count=1`. CI enforces this.
 
 | Workflow | File | Purpose |
 |---|---|---|
-| Local CI | `ci_local.yml` | Build, test, coverage ratchets, pipeline tests |
+| Local CI | `ci_local.yml` | Build, test, coverage ratchets, pipeline tests, gaze AI report (push to main) |
 | CI Checks | `ci_checks.yml` | MegaLinter + commitlint |
 | Security | `ci_security.yml` | OSV-Scanner, Trivy, Scorecards |
 | Dependencies | `ci_dependencies.yml` | Dependency review + dependabot |
@@ -63,11 +72,16 @@ Always run tests with `-race -count=1`. CI enforces this.
 ```text
 unbound-force/
 ├── .specify/                         # Speckit framework (templates, scripts, memory)
+├── .uf/                              # Review config (review matrix, reviewer manifest, sibling repos)
 ├── .opencode/
-│   ├── agents/                       # Hero persona agents (18 active)
-│   ├── commands/                     # Slash commands (48 files)
+│   ├── agents/                       # Hero persona agents (16 active)
+│   ├── commands/                     # Slash commands (33 files)
+│   ├── plugins/                      # Plugins registered in opencode.json (invoke-agent, review-dispatch, uf-workflow, uf-finale)
+│   ├── lib/                          # Shared TypeScript plugin library
+│   ├── test/                         # TypeScript plugin unit/integration/smoke tests
 │   ├── skill/                        # Swarm skills packages
 │   ├── skills/                       # Additional skills packages
+│   ├── package.json                  # Plugin npm manifest (locked by package-lock.json)
 │   └── uf/packs/                     # Convention packs
 ├── council-review-action/             # AI code review composite GitHub Action
 │   ├── action.yml                    # Composite action definition
@@ -75,26 +89,19 @@ unbound-force/
 │   ├── test/                         # Pipeline tests (91 assertions)
 │   └── docs/                         # Architecture, decisions, security, testing
 ├── cmd/unbound-force/                # Cobra CLI entry point
-├── cmd/mutimind/                     # Muti-Mind backend CLI
-├── cmd/mxf/                          # Mx F backend CLI
+├── cmd/coverage-gate/                # Scope-based Go coverage gate CLI
 ├── internal/
 │   ├── artifacts/                    # Artifact envelope I/O
-│   ├── backlog/                      # Muti-Mind backlog parsing
-│   ├── coaching/                     # Mx F coaching and retrospective data
 │   ├── config/                       # Unified config loading
-│   ├── dashboard/                    # Mx F dashboard rendering
+│   ├── coveragegate/                 # Scope-based Go coverage gate
 │   ├── doctor/                       # Environment health checks
 │   ├── gate/                         # Constitution compliance gate checks
 │   ├── gateway/                      # LLM reverse proxy (Vertex/Bedrock/Anthropic)
-│   ├── impediment/                   # Impediment tracking and detection
-│   ├── metrics/                      # Metrics collection and health analysis
-│   ├── orchestration/                # Swarm orchestration engine
+│   ├── homebrew/                     # Homebrew Cask release-publishing helpers
 │   ├── sandbox/                      # Containerized sessions (Podman/DevPod)
 │   ├── scaffold/                     # Core scaffold engine (embed.FS)
 │   ├── schemas/                      # JSON Schema generation/validation
 │   ├── setup/                        # Automated tool installation
-│   ├── sprint/                       # Sprint lifecycle management
-│   ├── sync/                         # GitHub issue sync
 │   └── textutil/                     # Shared text formatting helpers
 ├── docs/                             # User-facing documentation
 │   └── decisions/                    # Architecture Decision Records (ADRs)
@@ -103,6 +110,7 @@ unbound-force/
 ├── schemas/                          # JSON Schema registry
 │   ├── feedback-triage/              # Feedback triage schemas
 │   └── issue-triage/                 # Issue triage schemas
+├── coverage-gate.json                # Scope-based coverage thresholds
 ├── go.mod                            # Go module (1.25+)
 ├── opencode.json                     # MCP server configuration
 ├── .goreleaser.yaml                  # Release configuration
@@ -127,6 +135,12 @@ imported externally.
 - **CLI**: `github.com/spf13/cobra` for commands and flags
 - **Spec writing**: RFC 2119 language (MUST/SHOULD/MAY),
   Given/When/Then scenarios, FR-NNN numbering, line length < 72
+- **Clarification markers**: one shared grammar for spec.md —
+  colon, bare-with-text, and completely bare forms all extract
+  as questions; pluralized or unterminated marker-like text is
+  ignored by design. Well-formed marker syntax extracts as a
+  question even in documentation (quoted, fenced, or prose) —
+  avoid literal marker syntax in prose
 
 ## Testing Conventions
 
@@ -134,8 +148,8 @@ imported externally.
 - **Assertions**: `t.Errorf` / `t.Fatalf` directly
 - **Naming**: `TestXxx_Description`
 - **Isolation**: `t.TempDir()` for filesystem tests
-- **Drift detection**: Tests MUST verify embedded assets match
-  canonical sources
+- **Drift detection**: Tests MUST verify embedded tool-owned assets match canonical sources; custom packs (`*-custom.md`) are exempt as user-owned initial deployment templates
+- **Plugin coverage floor**: The `.opencode/` TypeScript plugin suite carries a 94 percent statements coverage floor (`.opencode/vitest.config.ts`); this floor is governance-controlled and may only be changed through a spec-workflow governance change per the Gatekeeping rule.
 
 ## Technology Stack
 
@@ -149,6 +163,18 @@ imported externally.
 - **Container runtime**: Podman (>= 4.3)
 - **Workspace manager**: DevPod (>= 0.5.0, optional)
 - **Embedding model**: `granite-embedding:30m` via Ollama
+- **TypeScript plugins**: `.opencode/plugins/` review plugins
+  (registered via the `opencode.json` `plugin` array) and the
+  `.opencode/lib/` shared library use
+  `@opencode-ai/plugin` 1.19.0 and `zod` 4.1.8 (runtime), and
+  `vitest` 5.0.3 + `@vitest/coverage-v8` 5.0.3 (dev), managed
+  by `.opencode/package.json` / `package-lock.json`.
+- **Node runtime floor** (plugin suite): transitive `ini@7.0.0`
+  requires ^22.22.2 || ^24.15.0 || >=26.0.0, declared in the
+  `engines` field of `.opencode/package.json` and its scaffold
+  mirror; CI `node-version: 22` resolves to v22.23.3 (in range,
+  verified 2026-10-19); older Node sees npm EBADENGINE warnings,
+  not hard failures
 
 ## Behavioral Rules
 
@@ -157,15 +183,33 @@ These rules are non-negotiable. Violations are CRITICAL severity.
 - **Gatekeeping**: MUST NOT modify quality/governance gates
   (coverage thresholds, CRAP scores, severity definitions,
   CI flags, agent settings, constitution MUST rules, review
-  limits, workflow markers). Stop and report instead.
+  limits, workflow markers, or pinned dependency versions). A
+  pinned dependency MAY be updated only for a documented security
+  or CI reliability fix when the target immutable commit SHA is
+  verified upstream, existing gates remain enforced, rollback to
+  the previous SHA is documented, reproducible validation evidence
+  is provided; and normal review and CI approval are completed.
+  Pins MUST NOT be changed to mutable tags or other
+  name-addressed refs. Agents MUST report and stop when any
+  condition is missing or when a change would weaken, bypass,
+  or disable a gate.
 - **Phase boundaries**: MUST NOT cross workflow phase boundaries.
   Spec phases: spec artifacts only. Implement: source code.
   Review: fixes only. Violation = process error, stop immediately.
 - **CI parity**: MUST replicate CI checks locally before marking
   tasks complete. Derive commands from `.github/workflows/`.
+- **Determinism gate**: Before writing, agents MUST classify
+  the work as deterministic or judgment-based. Deterministic
+  work (build/test/lint commands, transformations, verification)
+  MUST be executed via the exact commands or scripts rather
+  than paraphrased or improvised. Agents MUST NOT add
+  mechanical procedural prose (parsing, existence checks, git
+  choreography, output template rendering, enumeration loops)
+  to commands, agents, or skills where an executable tool is
+  feasible. Violations are CRITICAL severity.
 - **Review council**: MUST run `/uf.review-council` before PR
-  submission (already executed as `/uf.unleash` Step 8;
-  do not re-run). Resolve all REQUEST CHANGES. No code
+  submission (already executed as `/uf.unleash` Step 6, Code
+  Review; do not re-run). Resolve all REQUEST CHANGES. No code
   changes between APPROVE and PR. Exempt: constitution
   amendments, docs-only, emergency hotfixes.
 - **Branch protection**: MUST NOT commit directly to `main`.
@@ -174,7 +218,10 @@ These rules are non-negotiable. Violations are CRITICAL severity.
   assess documentation impact: `CHANGELOG.md` for change
   entries, `AGENTS.md` for structural updates (project
   structure, conventions, build commands), `README.md` for
-  description changes.
+  description changes. Retrospective learnings
+  (`.uf/dewey/learnings/*.md`, `.uf/dewey/compiled/*.md`)
+  satisfy this gate as intentional knowledge-capture
+  artifacts.
 - **Documentation gate**: MUST file a documentation issue
   against the current repo for user-facing changes before
   PR merge. Exempt: internal refactoring, test-only,
@@ -182,20 +229,28 @@ These rules are non-negotiable. Violations are CRITICAL severity.
 - **Zero-waste**: No orphaned specs, unused standards, or
   aspirational documents that do not map to actionable work.
 - **Commit scope**: Only commit files directly related to the
-  active spec or change. Tooling scaffolds (`uf init`,
-  convention pack updates, command directory renames, schema
-  template updates) MUST be committed on a separate branch
-  (e.g., `chore/uf.init-sync`), not mixed into feature
-  branches. Never use `git add -A` or `git add .` on feature
-  branches — stage files explicitly.
+  active spec or change. Dewey learnings
+  (`.uf/dewey/learnings/*.md` and `.uf/dewey/compiled/*.md`)
+  produced during the change's workflow are directly related
+  to the active change and MUST be included in the feature
+  PR. Tooling scaffolds (`uf init`, convention pack updates,
+  command directory renames, schema template updates) MUST be
+  committed on a separate branch (e.g., `chore/uf.init-sync`),
+  not mixed into feature branches. Scaffold assets and tests
+  required by and traced to an active approved change MAY ship
+  with that feature; unrelated scaffold refreshes still require
+  a separate branch, and explicit staging remains mandatory.
+  Never use `git add -A` or
+  `git add .` on feature branches — stage files explicitly.
 
 ### PR Review Commands
 
 | Command | When | Scope |
 |---------|------|-------|
-| `/uf.review-council` | Pre-PR (local; runs in `/uf.unleash` Step 8) | 5+ Divisor agents |
+| `/uf.review-council` | Pre-PR (local; runs in `/uf.unleash` Step 6, Code Review) | 5+ Divisor agents |
 | `/uf.review-pr [N]` | Post-PR (GitHub) | Single agent, CI analysis |
 | `/uf.address-feedback [N]` | Post-PR (GitHub) | Triage + address reviewer feedback |
+| `/uf.rebase-pr [N]` | Post-PR (GitHub) | Rebase a conflicted PR's head branch onto its base |
 
 ### Issue Triage Commands
 
@@ -236,6 +291,7 @@ All non-trivial changes MUST be preceded by a spec workflow.
 |------|------|------|-----------|
 | Strategic | Speckit | >= 3 stories, cross-repo | `specs/NNN-*/` |
 | Tactical | OpenSpec | < 3 stories, single-repo | `openspec/changes/*/` |
+| Quick | `/uf.unleash` routing | trivial fixes, chores, docs | `quick/<name>` branch |
 
 Pipeline: `constitution → specify → clarify → plan → tasks →
 analyze → checklist → implement`
@@ -245,6 +301,17 @@ before tasks. Tasks before implementation. Spec artifacts MUST
 be committed/pushed before implementation begins.
 
 **Branches**: Speckit: `NNN-<name>`. OpenSpec: `opsx/<name>`.
+Quick: `quick/<name>` (created by `/uf.unleash` tier routing;
+no spec artifacts, full quality gates).
+
+**Originating issue**: OpenSpec changes MAY include
+`originating_issue: <N>` in `.openspec.yaml` to thread a
+GitHub issue number through to the PR body. `/uf.finale`
+reads the field and emits `Closes #<N>` after `## Summary`
+when present. The field is optional and backward compatible.
+On a branch routed by `/uf.unleash` tier routing, the route
+decision's recorded `issue_number` (branch-scoped checkpoint
+state) takes precedence over `.openspec.yaml`.
 
 **Task bookkeeping**: Mark checkboxes `[x]` immediately on
 completion. `[P]` marks parallel-eligible tasks.
@@ -300,6 +367,11 @@ before writing or reviewing code.
 - `.opencode/uf/packs/severity.md`
 - `.opencode/uf/packs/content.md`
 - `.opencode/uf/packs/content-custom.md`
+- `.opencode/uf/packs/ci.md`
+- `.opencode/uf/packs/ci-custom.md`
+- `.opencode/uf/packs/determinism.md`
+- `.opencode/uf/packs/review-voice.md`
+- `.opencode/uf/packs/review-voice-custom.md`
 - `.opencode/uf/packs/go.md`
 - `.opencode/uf/packs/go-custom.md`
 - `.opencode/uf/packs/python.md`

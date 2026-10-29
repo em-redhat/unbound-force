@@ -33,8 +33,6 @@ by slash commands. You rarely need to call them directly.
 |-------|-----------|------|
 | `cobalt-crush-dev` | `/uf.cobalt-crush` | Developer persona |
 | `divisor-*` (9 agents) | `/uf.review-council` | Review council personas |
-| `muti-mind-po` | `/muti-mind.*` | Product owner |
-| `mx-f-coach` | `@mx-f-coach` | Coaching and retrospectives |
 | `gaze-reporter` | `/gaze` | Quality analysis |
 | `gaze-test-generator` | `/gaze-fix` | Test generation |
 
@@ -100,8 +98,14 @@ step. Then implement and finalize:
 /uf.finale
 ```
 
-`/uf.finale` commits, pushes, creates a PR, watches CI, and
-merges.
+`/uf.finale` commits, syncs with the base branch, pushes,
+creates a PR, watches CI, and returns to `main`. When the
+branch is behind the base branch, a confirmation gate offers
+to rebase onto it (recommended), continue without rebase, or
+abort. A base-state check failure (fetch or count, e.g.
+offline) degrades to a warning and the finale proceeds.
+A push-state count failure likewise degrades to a warning,
+with the push gate selecting a safe push mode.
 
 ### Build a Feature (Large)
 
@@ -121,7 +125,7 @@ pipeline:
 /speckit.implement     execute the tasks
         |
         v
-/uf.finale                commit, push, PR, merge
+/uf.finale                commit, sync with base, push, PR
 ```
 
 Optional intermediate steps: `/speckit.clarify` (refine
@@ -131,15 +135,23 @@ the spec), `/speckit.analyze` (consistency check),
 ### Go Fully Autonomous
 
 ```
-/uf.unleash
+/uf.unleash [change description]
 ```
+
+Pass a description (optionally with an issue reference
+like `#123`, which is resolved and threaded through to
+the PR); tier routing picks quick, OpenSpec, or Speckit
+automatically.
 
 Runs the full pipeline autonomously: clarify, plan,
 tasks, spec review, implement, code review, and
-retrospective. Works with both Speckit (`NNN-*` branches)
-and OpenSpec (`opsx/*` branches). Exits to human
-judgment only when it encounters ambiguity, review
-failures, or merge conflicts.
+retrospective. Works with Speckit (`NNN-*` branches),
+OpenSpec (`opsx/*` branches), and the quick tier
+(`quick/*` branches); invoked from `main` or an
+unrecognized branch, it routes to the right tier
+automatically. Exits to human judgment only when it
+encounters ambiguity, review failures, or merge
+conflicts.
 
 ### Explore Ideas
 
@@ -188,9 +200,10 @@ is detected, injecting credentials into the workspace.
 
 | Situation | Workflow | Start with |
 |-----------|----------|------------|
-| Bug fix or small task | OpenSpec | `/opsx-propose` |
-| New feature (3+ stories) | Speckit | `/speckit.specify` |
-| "Handle everything" | Either | `/uf.unleash` |
+| Trivial fix, chore, or docs | Quick | `/uf.unleash` |
+| Tactical change (< 3 stories) | OpenSpec | `/uf.unleash` or `/opsx-propose` |
+| New feature (3+ stories) | Speckit | `/uf.unleash` or `/speckit.specify` |
+| "Handle everything" | Any | `/uf.unleash` (routes automatically) |
 | Code review | Standalone | `/uf.review-council` |
 | Quality check (Go) | Standalone | `/gaze` |
 
@@ -210,6 +223,12 @@ agents enforce. After `uf init`, find them at:
   content-custom.md   # your content extensions
   typescript.md       # TypeScript conventions (tool-owned)
   typescript-custom.md # your TypeScript extensions
+  ci.md               # CI workflow conventions (tool-owned)
+  ci-custom.md        # your CI extensions
+  python.md           # Python conventions (tool-owned)
+  python-custom.md    # your Python extensions
+  review-voice.md     # review comment voice (tool-owned)
+  review-voice-custom.md # your review-voice extensions
 ```
 
 Edit the `*-custom.md` files to add project-specific
@@ -232,9 +251,7 @@ outside of OpenCode:
 See **[CLI Reference](cli-reference.md)** for full
 command documentation with flags and examples.
 
-The `mutimind` CLI provides terminal-based backlog
-management. See **[CLI Reference](cli-reference.md#mutimind)**
-for details.
+
 
 ## Quick Reference
 
@@ -243,6 +260,7 @@ for details.
 | `/uf.review-council` | Run the 9-persona review council |
 | `/uf.review-pr` | Review a GitHub PR (post-PR) |
 | `/uf.address-feedback` | Triage and address PR review feedback |
+| `/uf.rebase-pr` | Rebase a conflicted PR onto its base |
 | `/opsx-propose` | Create a change proposal with plan and tasks |
 | `/opsx-apply` | Implement tasks from an OpenSpec change |
 | `/opsx-explore` | Think through ideas (read-only) |
@@ -259,7 +277,7 @@ for details.
 | `/uf.cobalt-crush` | Invoke developer persona directly |
 | `/gaze` | Run quality analysis (Go projects) |
 | `/gaze-fix` | Generate tests for weak spots |
-| `/uf.finale` | Commit, push, create PR, merge |
+| `/uf.finale` | Commit, sync with base, push, create PR |
 | `/uf.agent-brief` | Create or audit AGENTS.md |
 | `/org` | Manage work items (cells) |
 | `/handoff` | End session with clean handoff |
@@ -268,20 +286,9 @@ for details.
 | `/forge-status` | Check parallel execution status |
 | `/uf.init` | Run uf init from within OpenCode |
 | `/uf.constitution-check` | Check constitution alignment |
-| `/workflow-start` | Begin hero lifecycle workflow |
-| `/workflow-status` | Check workflow state |
-| `/workflow-advance` | Advance workflow to next stage |
-| `/workflow-list` | List all workflows |
-| `/workflow-seed` | Seed workflow with initial data |
 
 ## See Also
 
-- **Backlog management** -- `/muti-mind.init` to set up,
-  `/muti-mind.backlog-add` to create items,
-  `/muti-mind.prioritize` to rank them
-- **Workflow orchestration** -- `/workflow-start`,
-  `/workflow-status`, `/workflow-advance` for the
-  6-stage hero lifecycle
 - **Parallel execution** -- `/forge` to decompose tasks
   and run multiple agents concurrently
 - **[AGENTS.md](../AGENTS.md)** -- Full reference for all

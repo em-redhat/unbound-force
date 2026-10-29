@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "scopes": {
+    "helper": {
+      "threshold": 80,
+      "packages": [
+        "cmd/coverage-gate",
+        "cmd/unbound-force",
+        "internal/scaffold",
+        "internal/doctor",
+        "internal/artifacts",
+        "internal/schemas",
+        "internal/config",
+        "internal/gateway",
+        "internal/homebrew",
+        "internal/sandbox",
+        "internal/setup"
+      ]
+    },
+    "artifact": {
+      "threshold": 90,
+      "packages": []
+    },
+    "schema": {
+      "threshold": 90,
+      "packages": []
+    },
+    "config": {
+      "threshold": 90,
+      "packages": [
+        "internal/coveragegate"
+      ]
+    },
+    "mapping": {
+      "threshold": 90,
+      "packages": [
+        "internal/textutil"
+      ]
+    },
+    "path": {
+      "threshold": 90,
+      "packages": []
+    }
+  }
+}

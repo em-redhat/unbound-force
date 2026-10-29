@@ -9,19 +9,19 @@ Unbound Force is an organization of AI agent personas (heroes) that collaborate 
 | Hero | Role | Status |
 |------|------|--------|
 | **Gaze** | Tester (Quality Sentinel) | Implemented |
-| **Muti-Mind** | Product Owner (Vision Keeper) | Implemented |
 | **Cobalt-Crush** | Developer (Engineering Core) | Implemented (embedded in `unbound-force`) |
 | **The Divisor** | PR Reviewer (Council) | Implemented (embedded in `unbound-force`) |
-| **Mx F** | Manager (Flow Facilitator) | Implemented (`mxf` CLI + coaching agent) |
 
 ## Constitution
 
-This organization is governed by a [constitution](.specify/memory/constitution.md) that defines four core principles:
+This organization is governed by a [constitution](.specify/memory/constitution.md) that defines six core principles:
 
 1. **Autonomous Collaboration** -- Heroes communicate through well-defined artifacts, not runtime coupling. Every hero completes its primary function independently.
 2. **Composability First** -- Every hero is independently installable and usable alone. Combining heroes produces additive value without mandatory dependencies.
 3. **Observable Quality** -- Every hero produces machine-parseable output (JSON minimum) with provenance metadata. Quality claims are backed by automated evidence.
 4. **Testability** -- Every component MUST be testable in isolation without requiring external services or shared mutable state.
+5. **Security by Default** -- Security is a structural property, not a review-time afterthought: supply chain integrity, input validation, and least privilege enforced by design.
+6. **Deterministic Execution** -- Agent context is a scarce shared resource: deterministic procedures run in tested tools; judgment lives in instruction prose.
 
 All hero repositories must maintain constitutions that align with (and never contradict) these org-level principles.
 
@@ -43,6 +43,16 @@ sudo dnf install -y "$(
 )"
 ```
 
+### Build from Source
+
+```bash
+git clone https://github.com/unbound-force/unbound-force.git
+cd unbound-force
+make install
+```
+
+Requires Go 1.25+ and `make`. Installs `unbound-force` and creates a `uf` symlink in `$GOPATH/bin`. Ensure `$GOPATH/bin` is on your `$PATH`, then verify with `uf version`.
+
 See **[QUICKSTART.md](QUICKSTART.md)** for full installation instructions (macOS and Fedora/RHEL), first-use walkthrough, and platform-specific guidance. See **[Usage Guide](docs/usage.md)** for common workflows and command reference.
 
 ## Specification Framework
@@ -51,10 +61,12 @@ The framework provides:
 
 - **Speckit** (strategic): Full 9-phase pipeline for architectural work (`/speckit.specify` through `/speckit.implement`)
 - **OpenSpec** (tactical): Lightweight workflow for bug fixes and small changes (`/opsx-propose` through `/opsx-archive`)
-- **Workflow orchestration**: Hero lifecycle commands (`/workflow start`, `/workflow status`, `/workflow list`, `/workflow advance`) for managing the 6-stage feature lifecycle
-- **Constitution governance bridge**: Every proposal includes alignment assessment against the four org principles
+- **Quick** (trivial): Spec-less pipeline for trivial fixes, chores, and docs (`/uf.unleash` creates the `quick/<name>` branch; full quality gates)
+- **Constitution governance bridge**: Every proposal includes alignment assessment against the six org principles
 
-`uf init` scaffolds 50 files into your repository: templates, scripts, commands, agents, Divisor review personas, convention packs, and the custom `unbound-force` OpenSpec schema. Use `uf init --divisor` to deploy only the PR review agents and convention packs. Use `--lang` to override language auto-detection for convention pack selection. User-owned files are skipped on re-run; tool-owned files are auto-updated when content changes.
+`uf init` scaffolds 65+ files into your repository: templates, scripts, commands, agents, Divisor review personas, convention packs, and the custom `unbound-force` OpenSpec schema. Use `uf init --divisor` to deploy only the PR review agents and convention packs. Use `--lang` to override language auto-detection for convention pack selection. User-owned files are skipped on re-run; tool-owned files are auto-updated when content changes.
+
+The Divisor review council now fans out across multiple models (`/uf.review-council`, `/uf.triage-issue`, `/uf.address-feedback`), configured via `.uf/review-matrix.yaml` and `.uf/reviewer-capabilities.yaml`. `make plugin-test` runs the TypeScript plugin suite and `make coverage-gate` enforces scope-based Go coverage; both are part of `make check`. The TypeScript plugin toolchain requires a Node version matching the transitive `ini@7.0.0` engine range (^22.22.2 || ^24.15.0 || >=26.0.0, declared in `.opencode/package.json`); `uf init` consumers inherit it via the scaffolded package manifests.
 
 See [AGENTS.md](AGENTS.md) for full workflow documentation and boundary guidelines. See [docs/architecture.md](docs/architecture.md) for how all components connect, [docs/cli-reference.md](docs/cli-reference.md) for CLI reference, and [docs/configuration.md](docs/configuration.md) for configuration guide.
 
@@ -64,8 +76,7 @@ This repo contains architectural design specs for all heroes and shared standard
 
 - **`specs/`** -- 35 architectural specifications covering constitution, hero architectures, swarm orchestration, tooling, and workflows
 - **`cmd/unbound-force/`** -- Go CLI binary for framework distribution
-- **`cmd/mutimind/`** -- Muti-Mind product owner backend CLI
-- **`internal/`** -- Business logic packages (scaffold, sandbox, gateway, config, doctor, gate, setup, orchestration, schemas, artifacts, backlog, sync, coaching, dashboard, impediment, metrics, sprint, textutil)
+- **`internal/`** -- Business logic packages (scaffold, sandbox, gateway, config, doctor, gate, setup, schemas, artifacts, coveragegate, textutil, homebrew)
 - **`.specify/memory/constitution.md`** -- The org constitution (highest authority)
 - **`openspec/`** -- OpenSpec tactical workflow configuration and schema
 - **`schemas/`** -- JSON Schema registry

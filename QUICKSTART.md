@@ -23,7 +23,7 @@ adapted for other AI coding tools.
   See [OpenCode provider docs](https://opencode.ai/docs/providers)
   for setup (Anthropic, OpenAI, Google, AWS Bedrock,
   and others supported).
-- **Go 1.24+** -- only if your project is Go-based
+- **Go 1.25+** -- only if your project is Go-based
   (used by review council CI checks and Gaze quality
   analysis)
 
@@ -103,6 +103,22 @@ curl -fsSL https://opencode.ai/install | bash
 For ARM64 systems, replace `amd64` with `arm64` in the
 grep pattern.
 
+### Build from Source
+
+```bash
+git clone https://github.com/unbound-force/unbound-force.git
+cd unbound-force
+make install
+```
+
+Requires Go 1.25+ and `make`. Installs `unbound-force` and
+creates a `uf` symlink in `$GOPATH/bin`. Ensure `$GOPATH/bin`
+is on your `$PATH`, then verify with:
+
+```bash
+uf version
+```
+
 ## For Project Maintainers
 
 Add Unbound Force to your project:
@@ -136,14 +152,15 @@ uf init --divisor
 
 ### What Gets Scaffolded
 
-`uf init` creates 34+ files in your project:
+`uf init` creates 65+ files in your project, including:
 
-- **8 commands** (`.opencode/commands/`) -- review
+- **11 commands** (`.opencode/commands/`) -- review
   council, finale, unleash, and more
-- **12 agents** (`.opencode/agents/`) -- developer,
-  reviewer council (9 personas), coaching
-- **9 convention packs** (`.opencode/uf/packs/`) --
-  coding standards for Go, TypeScript, content
+- **11 agents** (`.opencode/agents/`) -- developer,
+  reviewer council (9 personas), constitution checker
+- **15 convention packs** (`.opencode/uf/packs/`) --
+  coding standards for Go, Python, TypeScript, CI,
+  content, and review voice
 - **5 OpenSpec templates** (`openspec/schemas/`) --
   proposal, design, spec, and task templates
 
@@ -211,9 +228,11 @@ aspect of code quality. You receive an **APPROVE** or
 - **[Usage Guide](docs/usage.md)** -- Common workflows,
   agents, and command reference for daily use
 - **Specification workflows** -- `/opsx-propose` for
-  small changes, `/speckit.specify` for features
-- **Autonomous pipeline** -- `/uf.unleash` runs the full
-  workflow from spec to code review in one command
+  tactical changes, `/speckit.specify` for features
+- **Autonomous pipeline** -- `/uf.unleash [description]`
+  routes to the right tier (quick, OpenSpec, or Speckit)
+  and runs the pipeline through code review in one
+  command
 - **Full tool suite** -- `uf setup` installs all
   companion tools (Gaze, Dewey, Replicator)
 - **[AGENTS.md](AGENTS.md)** -- Full reference for AI

@@ -76,7 +76,11 @@ least one learning, and presents demo instructions.
    **When** demo instructions are presented,
    **Then** the instructions include: what was built,
    how to verify, key files changed, test results,
-   and the options `/finale` or `/speckit.clarify`.
+   and the options `/finale` and a
+   WORKFLOW_TIER-specific refinement option
+   (`/speckit.clarify` for speckit; artifact update
+   path for openspec, using the artifact directory
+   defined in spec 031).
 
 ---
 
@@ -150,8 +154,10 @@ after spec review with the findings.
    CRITICAL issues after plan and tasks generation,
    **When** `/unleash` reports the findings,
    **Then** it presents the issues with context and
-   suggests "/speckit.clarify to address the findings,
-   then re-run /unleash."
+   suggests a WORKFLOW_TIER-specific recovery action
+   (`/speckit.clarify` for speckit; artifact update
+   path for openspec) to address the findings, then
+   re-run `/unleash`.
 
 2. **Given** the spec review council finds only LOW
    and MEDIUM issues,
@@ -314,7 +320,7 @@ and plan (both exist) and resumes at tasks.
 - What happens when the session is interrupted during
   parallel worktree execution? On every `/unleash`
   invocation, a startup cleanup step runs
-  `swarm_worktree_list` and `swarm_worktree_cleanup`
+  `forge_worktree_list` and `forge_worktree_cleanup`
   for any stale worktrees from previous runs before
   proceeding. The cleanup only removes orphaned
   worktrees -- it does NOT touch spec.md, plan.md,
@@ -322,7 +328,7 @@ and plan (both exist) and resumes at tasks.
   preserved because those artifacts live in the main
   working directory, not in worktrees.
 - What happens when worktree merges produce conflicts?
-  `swarm_worktree_merge` uses cherry-pick. If no
+  `forge_worktree_merge` uses cherry-pick. If no
   conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
   remain after the cherry-pick, auto-resolution
   succeeded and the pipeline continues (after
@@ -386,12 +392,12 @@ and plan (both exist) and resumes at tasks.
 - **FR-011**: If any parallel worker fails, `/unleash`
   MUST stop spawning new workers, wait for
   already-running workers to complete or fail, clean
-  up all worktrees via `swarm_worktree_cleanup`, and
+  up all worktrees via `forge_worktree_cleanup`, and
   exit to the human with error context. The command
   cannot forcibly terminate running agents -- "stop"
   means best-effort (no new spawns + cleanup).
 - **FR-011a**: Worktree merges use
-  `swarm_worktree_merge` (cherry-pick). Auto-resolution
+  `forge_worktree_merge` (cherry-pick). Auto-resolution
   succeeds when no conflict markers (`<<<<<<<`,
   `=======`, `>>>>>>>`) remain in any file after the
   cherry-pick. If conflict markers remain, `/unleash`
@@ -424,7 +430,9 @@ and plan (both exist) and resumes at tasks.
 - **FR-016**: The demo step MUST present: what was
   built, how to verify, key files changed, test
   results summary, and next-step options (`/finale`
-  or `/speckit.clarify`).
+  and a WORKFLOW_TIER-specific refinement option using
+  the artifact directory defined in spec 031 for
+  openspec).
 - **FR-017**: `/unleash` MUST gracefully degrade when
   optional tools are unavailable: Dewey (fall back to
   human questions), Gaze (skip quality analysis),
@@ -446,7 +454,7 @@ and plan (both exist) and resumes at tasks.
   to return control to the human with accumulated
   context and next-step instructions.
 - **Swarm Worker**: A parallel execution unit spawned
-  via `swarm_spawn_subtask` with a dedicated git
+  via `forge_spawn_subtask` with a dedicated git
   worktree for file isolation.
 - **Learning**: A semantic memory entry stored via
   `hivemind_store` with tags linking it to the feature
@@ -502,7 +510,7 @@ and plan (both exist) and resumes at tasks.
 
 - Q: How should orphaned worktrees from interrupted
   sessions be handled? → A: Startup cleanup step runs
-  `swarm_worktree_list` + `swarm_worktree_cleanup`
+  `forge_worktree_list` + `forge_worktree_cleanup`
   on every invocation. Does not affect resumability
   (artifacts are in main working directory).
 - Q: What is the relationship between `/unleash` and
@@ -514,7 +522,7 @@ and plan (both exist) and resumes at tasks.
   provenance? → A: Yes, add `(Dewey-resolved from
   [page/block])` annotation for auditability.
 - Q: What merge strategy for worktree conflicts? → A:
-  Cherry-pick (what `swarm_worktree_merge` uses).
+  Cherry-pick (what `forge_worktree_merge` uses).
   Success = no conflict markers remain. Failure =
   conflict markers present → exit to human.
 - Q: How should spec review completion be detected for
@@ -545,8 +553,8 @@ and plan (both exist) and resumes at tasks.
   search across the knowledge base (specs, code,
   documentation) provides sufficient context to answer
   most domain questions autonomously.
-- The Swarm plugin is installed and `swarm_spawn_subtask`
-  and `swarm_worktree_create` tools are available for
+- The Swarm plugin is installed and `forge_spawn_subtask`
+  and `forge_worktree_create` tools are available for
   parallel execution. If not, sequential fallback is
   used.
 - The `/review-council` command is available and its
@@ -569,8 +577,8 @@ and plan (both exist) and resumes at tasks.
   artifact handoff.
 - The command file is tool-owned and auto-updated by
   `uf init` (same as `/finale`, `/cobalt-crush`, etc.).
-- Parallel execution uses Swarm's `swarm_worktree_create`
-  for git isolation and `swarmmail_reserve` for file
+- Parallel execution uses Swarm's `forge_worktree_create`
+  for git isolation and `comms_reserve` for file
   locking. Worktrees are merged back via
-  `swarm_worktree_merge` after all parallel workers in
+  `forge_worktree_merge` after all parallel workers in
   a phase complete.

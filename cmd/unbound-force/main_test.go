@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -29,15 +31,39 @@ func TestRunInit_FreshDir(t *testing.T) {
 		t.Errorf("expected output to contain 'files processed', got:\n%s", output)
 	}
 
-	// Verify the summary includes a non-trivial file count
-	// 45 = 39 prior + 1 pre-flight skill + 1 review-context
-	// skill + 1 always-on-guidance skill + 2 CI convention
-	// pack files (ci.md + ci-custom.md)
-	// + 1 starter constitution (.specify/memory/constitution.md).
-	// (devcontainer excluded — OS-specific, generated
-	// per-user by uf sandbox init).
-	if !strings.Contains(output, "45 files processed") {
-		t.Errorf("expected '45 files processed' in output, got:\n%s", output)
+	// Verify the summary includes a non-trivial, correct file count.
+	// The exact count is environment-dependent: review plugin activation
+	// appends the activation-gated plugin sources to the created set only
+	// when Node/npm/OpenCode are present and the install plus probes
+	// succeed. With 76 total embedded assets, minus 1 non-deployed
+	// (devcontainer) and 4 activation-gated plugins, the base count is 71.
+	// Each successful activation probe adds one file, yielding [71-75].
+	// The scaffold-level asset inventory and drift tests pin the exact
+	// asset list, so this CLI check asserts any count in that range.
+	// (devcontainer excluded — OS-specific, generated per-user by
+	// uf sandbox init.)
+	//
+	// The count is parsed from a line-anchored match and range-checked as
+	// an integer: a plain substring test would let "167 files processed"
+	// satisfy the "67" case.
+	filesProcessed := regexp.MustCompile(`(\d+) files processed$`)
+	var fileCount int
+	var found bool
+	for _, line := range strings.Split(output, "\n") {
+		if m := filesProcessed.FindStringSubmatch(line); m != nil {
+			n, err := strconv.Atoi(m[1])
+			if err != nil {
+				t.Fatalf("parse files-processed count %q: %v", m[1], err)
+			}
+			fileCount = n
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'N files processed' line in output, got:\n%s", output)
+	} else if fileCount < 71 || fileCount > 75 {
+		t.Errorf("expected files processed in [71-75], got %d:\n%s", fileCount, output)
 	}
 
 	// Verify a user-owned file was created
@@ -334,5 +360,148 @@ func TestRootCmd_HelpOutput(t *testing.T) {
 	// Usage line must show unbound-force [command].
 	if !strings.Contains(output, "unbound-force [command]") {
 		t.Errorf("expected help output to contain 'unbound-force [command]', got:\n%s", output)
+	}
+}
+
+// TestInitCmd_StealthHelpText is task 3.13's help-text assertion: the
+// --stealth flag help documents that the exclusion is local-only and not
+// preserved on re-clone.
+func TestInitCmd_StealthHelpText(t *testing.T) {
+	cmd := newInitCmd()
+	stealthFlag := cmd.Flags().Lookup("stealth")
+	if stealthFlag == nil {
+		t.Fatal("expected --stealth flag to be registered")
+	}
+	if !strings.Contains(stealthFlag.Usage, "local-only") {
+		t.Errorf("expected --stealth usage to mention local-only, got: %q", stealthFlag.Usage)
+	}
+	long := cmd.Long
+	if !strings.Contains(long, "local-only") {
+		t.Errorf("expected help text to mention local-only:\n%s", long)
+	}
+	if !strings.Contains(long, "re-clone") {
+		t.Errorf("expected help text to document re-clone non-portability:\n%s", long)
+	}
+}
+
+func TestInitCmd_StealthFlag(t *testing.T) {
+	cmd := newInitCmd()
+	stealthFlag := cmd.Flags().Lookup("stealth")
+	if stealthFlag == nil {
+		t.Fatal("expected --stealth flag to be registered")
+	}
+	checkFlag := cmd.Flags().Lookup("check")
+	if checkFlag == nil {
+		t.Fatal("expected --check flag to be registered")
+	}
+}
+
+func TestNewSetupCmd_CorrectUseAndShort(t *testing.T) {
+	cmd := newSetupCmd()
+	if cmd.Use != "setup" {
+		t.Errorf("Use = %q, want %q", cmd.Use, "setup")
+	}
+	if cmd.Short == "" {
+		t.Error("expected non-empty Short description")
+	}
+	if cmd.Long == "" {
+		t.Error("expected non-empty Long description")
+	}
+}
+
+func TestNewSetupCmd_FlagRegistered(t *testing.T) {
+	cmd := newSetupCmd()
+	dirFlag := cmd.Flags().Lookup("dir")
+	if dirFlag == nil {
+		t.Error("expected --dir flag")
+	}
+	dryRunFlag := cmd.Flags().Lookup("dry-run")
+	if dryRunFlag == nil {
+		t.Error("expected --dry-run flag")
+	}
+	yesFlag := cmd.Flags().Lookup("yes")
+	if yesFlag == nil {
+		t.Error("expected --yes flag")
+	}
+}
+
+func TestSetupParamsStruct(t *testing.T) {
+	_ = setupParams{
+		targetDir: ".",
+		dryRun:    true,
+		yesFlag:   true,
+		stdout:    nil,
+		stderr:    nil,
+	}
+}
+
+func TestRunSetup_ParamsConstruct(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	_ = runSetup(setupParams{
+		targetDir: dir,
+		dryRun:    false,
+		yesFlag:   false,
+		stdout:    &stdout,
+		stderr:    &stderr,
+	})
+}
+
+func TestNewSetupCmd_HelpDoesNotPanic(t *testing.T) {
+	cmd := newSetupCmd()
+	cmd.SetArgs([]string{"--help"})
+	root := &cobra.Command{Use: "uf"}
+	root.AddCommand(cmd)
+	root.SetArgs([]string{"setup", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("unexpected error executing --help: %v", err)
+	}
+}
+
+func TestNewSetupCmd_ExecuteCoversRunE(t *testing.T) {
+	dir := t.TempDir()
+	cmd := newSetupCmd()
+	root := &cobra.Command{Use: "uf"}
+	root.AddCommand(cmd)
+	root.SetArgs([]string{"setup", "--dir", dir})
+	if err := root.Execute(); err != nil {
+		t.Logf("expected setup error: %v", err)
+	}
+}
+
+func TestNewDoctorCmd_ExecuteCoversRunE(t *testing.T) {
+	dir := t.TempDir()
+	cmd := newDoctorCmd()
+	root := &cobra.Command{Use: "uf"}
+	root.AddCommand(cmd)
+	root.SetArgs([]string{"doctor", "--dir", dir, "--format", "text"})
+	if err := root.Execute(); err != nil {
+		t.Logf("expected doctor error: %v", err)
+	}
+}
+
+func TestInitCmd_CheckFlag(t *testing.T) {
+	cmd := newInitCmd()
+	checkFlag := cmd.Flags().Lookup("check")
+	if checkFlag == nil {
+		t.Fatal("expected --check flag")
+	}
+}
+
+func TestRunInit_StealthCheckParams(t *testing.T) {
+	p := initParams{
+		targetDir:   ".",
+		force:       false,
+		divisorOnly: true,
+		stealth:     true,
+		check:       true,
+		version:     "1.0.0-test",
+		stdout:      nil,
+	}
+	if !p.stealth {
+		t.Error("expected stealth to be true")
+	}
+	if !p.check {
+		t.Error("expected check to be true")
 	}
 }

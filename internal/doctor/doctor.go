@@ -156,7 +156,6 @@ func Run(opts Options) (*Report, error) {
 		checkConfiguration(&opts),
 		checkAgentContext(&opts),
 		checkScaffoldedFiles(&opts),
-		checkHeroAvailability(&opts),
 		checkMCPConfig(&opts),
 		checkAgentSkillIntegrity(&opts),
 	}
@@ -197,6 +196,12 @@ func appendConditionalGroups(groups []CheckGroup, opts *Options) []CheckGroup {
 	// Python tools: included when a Python project marker is detected.
 	if isPythonProject(opts.TargetDir) {
 		groups = append(groups, checkPythonTools(opts))
+	}
+
+	// Review plugins: included when the scaffolded .opencode/package.json
+	// manifest is present (SC-FR-005). The check returns nil otherwise.
+	if reviewGroup := checkReviewPlugins(opts); reviewGroup != nil {
+		groups = append(groups, *reviewGroup)
 	}
 
 	return groups

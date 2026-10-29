@@ -15,8 +15,1002 @@ Each entry follows the format: `- <change-name>: <summary>`.
   per Constitution III. Three-tier exit codes (0/1/2).
   Follows the `internal/doctor/` package pattern.
   (Spec: openspec/changes/uf-gate/, Closes: #514)
+- port-uf-rebase-pr: Ported the verified personal global command
+  `resolve-branch-conflict.md` into the UF command set as
+  `.opencode/commands/uf.rebase-pr.md`, invoked as
+  `/uf.rebase-pr <PR_NUMBER>`: rebases a conflicted PR's head
+  branch onto its base branch, resolves conflicts, and
+  force-pushes with lease so the PR can be merged with rebase
+  once approved. The port follows `uf.review-pr.md` conventions
+  (YAML frontmatter, `<protect>` block, session-resume guard,
+  `^[1-9][0-9]*$` argument pre-validation) across six phases —
+  prerequisites, PR fetch/gating, checkout and rebase, conflict
+  resolution, push, verify — under nine guardrails: no
+  merge/approve/close, never push the base branch, remotes
+  resolved never assumed, `--force-with-lease` never `--force`,
+  conflicts-only edits, no guessing, clean backout, gh
+  verification before API calls, and determinism. Prefers the
+  existing git plugin tools (`git_fetch`, `git_rebase`,
+  `git_rebase_abort`, `git_push_force_with_lease`) per
+  determinism pack DE-001, with fork-aware remote resolution
+  that verifies the branch upstream is
+  `<HEAD_REMOTE>/<HEAD_BRANCH>` before using the plugin push,
+  falling back to `git push --force-with-lease <remote>
+  <branch>`. The scaffold mirror
+  `internal/scaffold/assets/opencode/commands/uf.rebase-pr.md`
+  is byte-identical and registered in `expectedAssetPaths`
+  (commands count 11 → 12) so scaffold drift detection stays
+  green; `TestRunInit_FreshDir`'s count range shifts
+  [70-74] → [71-75] for the 76th embedded asset.
+  (Spec: openspec/changes/port-uf-rebase-pr/, Fixes: #851,
+  Docs: #856, unbound-force/website#340)
+- replicator-version-floor: Added a version-floor sub-check to
+  `uf doctor`'s Replicator check group (Spec 024, FR-011): when
+  the `replicator` binary is present, the sub-check runs
+  `replicator --version` under a 5s timeout, parses the
+  semantic-version major.minor.patch core (development and
+  build suffixes ignored, so a dev build past the floor
+  satisfies it), and emits a `replicator version` CheckResult.
+  At or above v0.7.0 it Passes with the detected version;
+  below the floor it Warns -- never Fails, since an outdated
+  install is not treated more harshly than a missing one and
+  Replicator is optional under Constitution Principle II --
+  with a message like `v0.6.0 (requires >= v0.7.0)` and the
+  upgrade hint `brew upgrade unbound-force/tap/replicator`
+  (install URL: https://github.com/unbound-force/replicator).
+  Version-command errors, timeouts, and unparseable output
+  all fail open to a Warn "version could not be verified"
+  while the remaining group sub-checks still run; an absent
+  binary preserves the existing early return with no version
+  result. The floor lives in a single named constant in the
+  doctor package, and the new row serializes additively into
+  `uf doctor --format json` (no breaking changes). Doctor
+  tests cover the above-floor, below-floor, dev-suffix,
+  unparseable, and version-command-failure paths.
+  (Spec: openspec/changes/replicator-version-floor/)
+  (Docs: #844, unbound-force/website#337)
+- unleash-interactive-clarify: Added an interactive clarify ask
+  gate to `/uf.unleash` Step 1 (Clarify, Speckit tier): each
+  question Dewey cannot answer -- and every question when
+  Dewey is unavailable -- is now put to the human through a
+  single question tool call before any exit, instead of
+  ejecting the developer into manual spec editing and a full
+  pipeline re-run. One question per call, no batching (the
+  next ask only after the previous response), each carrying
+  the question text and its surrounding spec context; the
+  ask SHOULD present 2-5 mutually exclusive options drawn
+  from the question's own enumerated alternatives, MUST
+  list the spec's stated working default first labeled
+  "(Recommended)" when the spec states one, MUST keep a
+  custom free-form answer enabled, and MUST include a defer
+  option in every ask. Questions Dewey answered never reach
+  the gate (silent auto-resolution preserved); there is no
+  question cap -- every unanswerable question is resolved or
+  deferred before Step 1 completes. A chosen or custom
+  answer resolves through the existing `resolve_clarification`
+  tool with a new optional `resolved_by` enum ("dewey" |
+  "human", default "dewey"): `source` is now conditionally
+  required -- required for "dewey", rejected for "human"
+  (the ask gate itself is the answer's provenance), enforced
+  fail-closed at the schema level -- and the `## Clarifications`
+  log entry now records who resolved each question:
+  "(Dewey-resolved from ...)" as today versus
+  "(human-answered during /uf.unleash clarify)" for ask-gate
+  answers. Deferred questions -- and all unanswerable
+  questions when the question tool is unavailable in the
+  session -- flow to the existing clarify exit unchanged,
+  the fallback for unattended runs. After processing, Step 1
+  announces the counts of questions auto-resolved by Dewey,
+  human-answered at the ask gate, and deferred, proceeding
+  to Step 2 (Plan) when the unanswerable list is empty; the
+  Guardrails section names the ask gate as a second
+  legitimate mid-pipeline human interaction alongside the
+  Step 4 per-finding spec review decision gate. Vitest cases
+  in `.opencode/test/unleash-clarify.test.ts` pin the
+  `resolved_by` schema, the conditional `source` requirement,
+  and both provenance renderings (existing Dewey-path
+  assertions unchanged under the default); scaffold mirrors
+  under `internal/scaffold/assets/opencode/` updated
+  byte-identically (drift-detection tests).
+  (Spec: openspec/changes/unleash-interactive-clarify/)
+- rebase-upstream-before-push: Added a step 4 "Sync with Base
+  Branch" to `/uf.finale`, between commit and push, so PRs
+  are no longer born stale when the base branch has advanced.
+  Backed by a new `uf_finale_base_state` uf-finale plugin
+  tool (8 → 9 registered tools): it resolves the target
+  remote (`upstream` when present, else `origin`), resolves
+  the base branch (the remote's HEAD via `git symbolic-ref`,
+  `main` fallback), fetches it, and returns `{remote,
+  baseBranch, baseRef, aheadBy, behindBy}` in the standard
+  success/failure envelope. When the branch is behind, a
+  session-resume-guarded MANDATORY GATE offers rebase onto
+  `<remote>/<baseBranch>` (recommended), continue without
+  rebase (PR will be behind), or abort; a confirmed rebase
+  that conflicts aborts via `git_rebase_abort`, reports the
+  conflicted files, and stops with the pre-rebase state
+  preserved. The push step selects its mode from the sync
+  outcome: `git_push_force_with_lease` after a rebase on a
+  branch with an upstream, plain `git_push` (with
+  `setUpstream`) for a first push. A base-state check failure
+  (fetch or count, e.g. offline) is a soft gate -- a retryable
+  `BASE_SYNC_FETCH` or `BASE_SYNC_COUNT` warning, then the
+  finale proceeds exactly as before. Steps
+  after the insertion renumber (Push 4→5, PR 5→6, CI 6→7
+  with 6b→7b, Return to Main 7→8, Summary 8→9); the step-2
+  no-changes path now lands on the sync step; all in-file
+  cross-references update. Scaffold mirrors under
+  `internal/scaffold/assets/opencode/` updated byte-identically
+  (enforced by drift-detection tests). Unit tests in
+  `.opencode/test/uf-finale.test.ts` cover upstream remote
+  preference, origin-only fallback, symbolic-ref failure
+  falling back to `main`, the offline `BASE_SYNC_FETCH`
+  envelope, the `BASE_SYNC_COUNT` envelope when commit
+  counting fails, and ahead/behind counts.
+  (Spec: openspec/changes/rebase-upstream-before-push/)
+- delegation-skill-enforcement: Closed the enforcement gap
+  behind audit finding F6 / issue #787 -- the "mechanical
+  tasks use repo tooling" prose rule in `uf.unleash.md`
+  graduated to a fail-closed tool contract (Principle VI
+  applied to its own enforcement gap).
+  `uf_delegate_command`
+  (`.opencode/plugins/uf-workflow/index.ts`) gained three
+  parameters: `task_classification` (`deterministic` |
+  `judgment`; required for prompt-only delegation, optional
+  for command-path), `skill` (a repo skill name resolved
+  against `.opencode/skills/` then `.opencode/skill/` with
+  first-root precedence on collision, or a
+  traversal-guarded repo-relative script path --
+  existence-verified before the command-file read,
+  host-model resolution, and child spawn), and
+  `skill_absent_reason` (the recorded justification).
+  Deterministic-classified calls supplying neither field
+  fail non-retryably with `SKILL_REFERENCE_REQUIRED`;
+  unresolvable references fail with `SKILL_NOT_FOUND`
+  naming the searched locations; both envelopes carry
+  remediation text. A resolved reference is injected into
+  the composed prompt as a tool-rendered directive at a
+  fixed position (after command text and feature-dir
+  context, before the extra prompt), and the
+  classification, resolved reference, and any recorded
+  reason are written to the checkpoint data and success
+  envelope -- the audit record, not prompt archaeology.
+  The command template's "Mechanical tasks use repo
+  tooling" prose block (with its other-project
+  renumber-adr example) became a self-describing
+  classification step plus the parameter contract on
+  every prompt-only call shape -- quick-tier
+  whole-change, per-task implement, and code-fix -- and
+  Swarm parallel spawn prompts now carry the
+  classification and verified reference in the subtask
+  description. Governance layers: the determinism pack
+  (repo-local) bumped 1.2.0 → 1.3.0 adding DE-008
+  [MUST] (deterministic delegation carries a verified
+  skill/script reference or a substantive recorded
+  absence reason; delegation instruction uses the
+  parameter contract, not prose-only skill
+  instructions) and joined the MUST/CRITICAL severity
+  mapping; the determinism-first skill gained matching
+  delegation guidance and Related Enforcement entries;
+  and divisor-guard's Code Review Mode checklist gained
+  a Deterministic Delegation Discipline section
+  (self-describing; cites no repo-local artifacts). All
+  three scaffold-embedded sources (uf-workflow plugin,
+  uf.unleash.md template, divisor-guard.md) updated
+  with byte-identical mirrors, drift-detection tests
+  green. Tests: `.opencode/test/unleash-delegate.test.ts`
+  grew to 77 tests covering every spec scenario (skill
+  resolution across both roots, first-root collision,
+  script paths, traversal rejection, SKILL_* envelope
+  remediation, golden-shape directive assertions,
+  checkpoint round-trips, judgment pass-through,
+  command-path exemption), with argument-contract pins
+  added to `uf-workflow.test.ts` and
+  `scratch-smoke.test.ts` (DE-007 layer 1). (Spec:
+  openspec/changes/delegation-skill-enforcement/,
+  Refs: #787)
+- unleash-tier-routing: Added a tier-routing step to `/uf.unleash`
+  for ON_MAIN/UNRECOGNIZED_BRANCH states: autonomous tier selection
+  via the new tier-routing skill, a `uf_unleash_route_decision` tool
+  that records the decision, mechanically enforces risk floors
+  (rejecting `quick` when a floor signal is present), and creates
+  `quick/<name>` branches; a `quick` workflow tier that runs
+  implement, pre-flight checkpoint, review council, retrospective,
+  and demo without spec artifacts; issue-reference resolution
+  (`#NNN`/URLs via `gh issue view`, untrusted-content handling)
+  threaded through delegation prompts and re-keyed checkpoint state
+  so `/uf.finale` emits `Closes #<N>` for every tier; and
+  `WORKFLOW_TIERS` gaining `quick` across gate, resume, templates,
+  and finale.
+- seam-verification: Added three test layers verifying the
+  seams prose→tool migrations create, plus pack rule DE-007
+  codifying the obligation. Layer 1 — registration
+  surface: new suite `.opencode/test/registration-surface.test.ts`
+  (20 tests) dynamically enumerates all 47 tools across
+  the four plugins, asserting presence with description
+  and execute, the pre-#732 `parameters:` mis-key guard
+  (the load-bearing content of the biconditional
+  schema-non-empty-iff-declared property — the SDK
+  `tool()` helper is an identity pass-through over `args`
+  alone), and execution of the `z.object(args)` conversion
+  the host validates input through (it throws on non-zod
+  shapes and rejects non-object payloads); the zod-shape
+  fallback is covered structurally with a documented
+  transition condition. Layer 2 — documented
+  output shape: new suite `.opencode/test/golden-output-shape.test.ts`
+  (41 tests over 43 documented-output-shape sites across
+  uf-workflow/uf-finale/review-dispatch) executes each
+  documented tool call in the suite's registry scope and
+  asserts the documented fields are present in the
+  returned envelope, with all 8 `format_unleash_exit`
+  variants additionally pinned by tool==lib equivalence
+  to the renderer goldens; the fixture inventory is
+  grep-derived to prevent drift, and the four
+  `dispatch_review_runs` sites are pinned in
+  `dispatch-review-runs.test.ts` as golden tests across
+  every documented input variant (triage — the #735
+  contract — code-mode, and feedback-mode). Layer 3 — round-trips
+  and command-contract pins: write→read round-trip
+  assertions in `uf-finale.test.ts` pin all 8 writer
+  parameters (including `review_verdicts` and
+  `learnings_stored`); the dispatch-artifact resume-parser
+  round-trip in `finalize-review-dispatch.test.ts`
+  confirms every consumed field pinned; and Go-side
+  command-contract pins expand `TestUnleashCommand_ToolRoutingContracts`
+  (`internal/scaffold/scaffold_test.go`) from 10 → 32
+  subtests — census-complete: every tool the `uf.unleash`
+  command text invokes is pinned or excluded as a
+  non-migration seam. Determinism pack
+  `.opencode/uf/packs/determinism.md` bumped 1.1.0 →
+  1.2.0, adding DE-007 [MUST] (seam verification: a
+  prose→tool migration increment must verify the seams
+  it creates in the same increment — registration
+  surface, documented output shape, round-trips;
+  tasks.md must include a seam-verification task naming
+  the three layers; violations are CRITICAL), with the
+  matching authoring-time hook in
+  `.opencode/skills/determinism-first/SKILL.md`. Pack and
+  skill remain repo-local; no scaffold-mirror changes.
+  (Spec: openspec/changes/seam-verification/, Refs: #765)
+- router-pattern-codification: Extended the determinism
+  policy one level, from step-level extraction to
+  sequence-level collapse (the Router Pattern: the agent
+  outputs a single intent; deterministic tool code maps it
+  to the required sequence of calls). Determinism pack
+  `.opencode/uf/packs/determinism.md` bumped 1.0.0 → 1.1.0,
+  adding a terminal "Intent-Level Orchestration" section
+  with DE-005 [MUST] (a fixed sequence of tool calls with
+  no judgment between steps — each next call and its
+  arguments fully determined by the previous call's
+  structured result — MUST collapse into a single
+  intent-level tool; ordering, batching, retry, failure-stop,
+  and branching on structured results belong to the tool)
+  and DE-006 [SHOULD] (intent-level tools keep judgment at
+  their boundary: judgment products arrive as validated
+  parameters, routing decisions execute inside the tool as
+  constants or pure functions). Severity mapping updated to
+  (DE-001, DE-003, DE-005) / (DE-002, DE-004, DE-006);
+  DE-001..DE-004 rule text byte-unchanged (append-only IDs).
+  Determinism-first skill
+  `.opencode/skills/determinism-first/SKILL.md` gained
+  chain-collapse guidance: new "Chains Without Judgment
+  Collapse Too" section plus five prose updates (frontmatter
+  description second sentence, twice-test extension, two
+  mechanical-procedure bullets, extraction step 4, "DE-001
+  through DE-006"). Rules enter every Divisor review prompt
+  via existing pack auto-discovery. Both files remain
+  repo-local (no constitution, AGENTS.md, scaffold, or
+  plugin changes).
+  (Spec: openspec/changes/router-pattern-codification/, Refs: #758)
+- gaze-ai-report: Added a push-to-main Gaze AI report job to Local CI
+  (`ci_local.yml`) consuming the SHA-pinned unbound-force/gaze reusable
+  workflow with thresholds 30/12/55; `build-and-test` now uploads
+  `coverage.out` as the `coverage-out` artifact for the same-run handoff.
+- unleash-deterministic-tools: Migrated `/uf.unleash`'s
+  remaining deterministic procedures into 11 tested
+  uf-workflow plugin tools (uf_unleash_branch_gate,
+  uf_delegate_command, uf_unleash_detect_resume,
+  scan_clarifications, resolve_clarification,
+  format_unleash_exit, format_unleash_demo,
+  write_unleash_summary, parse_tasks, mark_task_complete,
+  scan_conflict_markers) plus shared
+  lib/branch-classification.ts (consumed by the refactored
+  uf_finale_startup; legacy output shape preserved) and
+  lib/unleash-templates.ts. Step tools auto-record
+  checkpoints (13 ceremony blockquotes removed; the two
+  review-loop iteration checkpoints remain explicit);
+  every exit and the demo render through formatter tools
+  with verbatim emission (OUTPUT FIDELITY GUARD and
+  re-read instructions deleted; guardrail amended).
+  Resumability is artifact-authoritative:
+  uf_unleash_detect_resume derives review completion from
+  .uf/artifacts/dispatch/ verdicts (branch-scoped,
+  per-mode freshness) over checkpoint state.
+  write_unleash_summary persists the unleash summary
+  (.uf/artifacts/unleash-summary/<branch>.json) in the
+  exact shape /uf.finale reads, closing the
+  finale-token-reduction contract
+  (whatWasBuilt/howToVerify/testResults; implements #707).
+  The legacy persist_unleash_summary name remains
+  registered as a compatibility alias of
+  write_unleash_summary, but it now carries the
+  write_unleash_summary contract (change_name, tier,
+  feature_dir, review_verdicts, learnings_stored, plus the
+  three demo bodies) — callers of the sibling change's
+  three-parameter contract (whatWasBuilt/howToVerify/
+  testResults only) receive INVALID_INPUT; alias removal
+  will be revisited once
+  openspec/changes/persist-unleash-summary/ archives.
+  Command markdown + Go/TS test updates only; scaffold
+  mirrors byte-identical. The tool layer is fail-closed
+  end to end: every tool validates input through shared
+  glue (parseToolInput/resolveToolParam/failureFromError),
+  rejects git pathspec magic in feature_dir, and converts
+  unexpected runtime failures into *_ERROR envelopes,
+  with each catch-all path carrying a regression test
+  (scan/resolve/demo); delegation pins for Steps 2/3/5
+  and staged lib-module lockstep (content, tool-ownership,
+  Divisor staging) guard the scaffold side. Includes the
+  maintainer-approved review-matrix per-run timeout bump
+  600s → 1200s (mirrors synced). Increment 2 of the
+  deterministic-instruction migration. (Spec:
+  openspec/changes/unleash-deterministic-tools/, Refs:
+  #716, #707)
+- persist-unleash-summary: `/uf.unleash` Step 10 (Demo) now
+  persists the presented demo output via a new
+  `persist_unleash_summary` uf-workflow tool: the What Was
+  Built, How to Verify, and Test Results section bodies
+  (excluding `##` headers) are written as a flat JSON
+  artifact at `.uf/artifacts/unleash-summary/<branch>.json`
+  (validation-first, hardened write: 0o700 dir, 0o600 file,
+  symlink refusal, detached-HEAD and git-error failures).
+  `/uf.finale` reads the artifact in the PR body through
+  `uf_finale_pr_context`, replacing grep-based working-tree
+  recovery. Soft-fail in the pipeline: persist errors warn
+  and continue. Plugin tool + tests (14), command update,
+  scaffold mirrors.
+  (Spec: openspec/changes/persist-unleash-summary/,
+  Refs: #707)
+- unleash-direct-review-dispatch: Rewrote `/uf.unleash`
+  Steps 4 (Spec Review) and 6 (Code Review) to call
+  review-dispatch tools directly (resolve_base_ref,
+  plan_review_dispatch, dispatch_review_runs,
+  consolidate_dispatch) instead of delegating to a
+  cobalt-crush-dev driver session — one child session
+  removed per review step and the 1,145-line council
+  command payload no longer enters the dispatch path;
+  council protocol sections are cited as normative
+  reference instead. Added a parent-side spec auto-fix
+  consent gate: on REQUEST CHANGES with only LOW/MEDIUM
+  findings, the question tool MUST be presented (Apply
+  auto-fixes / Review findings first / Skip auto-fixes)
+  before any spec artifact is modified; consented fixes
+  follow severity.md (HIGH/CRITICAL report-only), then
+  every included reviewer re-runs (max 3 iterations).
+  Step 6 now runs the pre-flight soft gate before
+  dispatch (branch-caused failures stop with fail-closed
+  finalization and zero child reviewers; pre-existing
+  failures recorded non-blocking) and maps verdicts:
+  approving verdicts proceed, REQUEST CHANGES enters the
+  ≤3-iteration fix loop with cobalt-crush-dev applying
+  code fixes, INCONCLUSIVE/UNAVAILABLE exits with
+  reasons. The "NEVER pause between steps" guardrail now
+  names the consent gate as the single legitimate
+  mid-pipeline human interaction. Command markdown only;
+  scaffold mirror byte-identical (791 → 1006 lines).
+  Increment 1 of the deterministic-instruction migration.
+  (Spec: openspec/changes/unleash-direct-review-dispatch/,
+  Refs: #716)
+- review-voice-pack: Added `review-voice` + `review-voice-custom`
+  convention pack pair for per-project review-output prose style
+  (sentence style, framing, tone). Always-deployed via scaffold
+  registration (7→9); applied to GitHub-posted prose in
+  `/uf.review-pr`, `/uf.review-council`, `/uf.triage-issue`,
+  `/uf.address-feedback`. Style-only precedence: MUST NOT alter
+  severities, verdicts, finding counts, footers, or structural format.
+  Custom packs are exempt from embedded-asset drift comparison (FR-023).
+  (Spec: openspec/changes/review-voice-pack/, Fixes: #657)
+- determinism-codification: Repo-local codification of the
+  Deterministic Execution principle across the governance stack.
+  Constitution amended 1.3.1 → 1.4.0, adding Principle VI
+  "Deterministic Execution" to `.specify/memory/constitution.md`.
+  New governance convention pack `.opencode/uf/packs/determinism.md`
+  with rules DE-001 [MUST], DE-002 [SHOULD], DE-003 [MUST],
+  DE-004 [SHOULD], auto-discovered by review dispatch with no
+  plugin changes. New skill `.opencode/skills/determinism-first/SKILL.md`
+  with classify-before-writing guidance for coding agents. AGENTS.md
+  gains a "Determinism gate" Behavioral Rule (CRITICAL severity)
+  plus an exhaustive Convention Packs listing. Test-file
+  registration: `knownNonEmbeddedFiles` entries in
+  `internal/scaffold/scaffold_test.go` and a governance-pack
+  skip-list entry in `internal/schemas/packvalidator_test.go`.
+  Pack and skill are deliberately repo-local (no `uf init`
+  propagation). Motivated by the token-reduction epic (#659) and
+  the uf.unleash audit (#716).
+  (Spec: openspec/changes/determinism-codification/)
+- finale-token-reduction: Reduced `/uf.finale` command template from
+  ~1,089 to ~300 lines (~70% token reduction). Extracted deterministic
+  procedures into plugin tools: 10 shared git tools and
+  `normalize_model_name` in uf-workflow plugin, 8 composite tools in
+  new uf-finale plugin. Implements unleash-summary artifact consumption
+  (#707). Uniform plugin probe validation across all 4 plugins.
+  (Spec: openspec/changes/finale-token-reduction/, Closes: #659)
+- uf-workflow-checkpoint: Extended uf-workflow plugin with three new tools
+  (`checkpoint`, `get_progress`, `clear_progress`) for unified workflow
+  progress tracking. Six command files updated to replace execution
+  checklist checkbox editing with structured JSON state files in
+  `.uf/progress/`. Includes symlink defense, path sanitization, and
+  restrictive file permissions (0o600/0o700). (Spec:
+  openspec/changes/uf-workflow-checkpoint/)
+- build-from-source: Added "Build from Source" install
+  instructions to README.md and QUICKSTART.md. Documents
+  prerequisites (Go 1.25+, make), clone + install commands
+  (`make install`), and verification (`uf version`).
+  (Spec: openspec/changes/build-from-source/,
+  Fixes: #536)
+
+### Removed
+
+- remove-mutimind-mxf-orchestration: Removed Muti-Mind product owner
+  hero (cmd/mutimind, internal/backlog, internal/sync, schemas/hero-manifest,
+  schemas/backlog-item, .opencode/agents/muti-mind-po.md, 12 muti-mind
+  commands). Removed Mx F manager hero (cmd/mxf, internal/coaching,
+  internal/dashboard, internal/impediment, internal/metrics, internal/sprint,
+  schemas/acceptance-decision, schemas/metrics-snapshot, schemas/coaching-record,
+  schemas/workflow-record, .opencode/agents/mx-f-coach.md, 5 workflow commands).
+  Removed internal/orchestration swarm orchestration engine. Updated
+  documentation, configuration, and constitution references. Constitution
+  amended to v1.3.1 (PATCH: remove Muti-Mind and Mx F references).
+  (Spec: openspec/changes/remove-mutimind-mxf-orchestration/, Fixes: #565, Fixes: #566)
+
+### Changed
+- question-tool-presentation-contract: Applied the question-tool
+  presentation contract to all 22 human-facing decision gates in
+  `/uf.triage-issue` (8), `/uf.address-feedback` (6), and
+  `/uf.review-pr` (8): each gate prints its decision content as
+  plain session text above the question tool (visibility
+  directive — the same details and options), adds per-option
+  reasoning (what each choice does and when it fits) and an
+  advisory recommendation grounded in the command's own
+  assessment data, and presents the recommended option first,
+  labeled "(Recommended)". Option sets, MANDATORY GATE markers,
+  session-resume guards, and CRITICAL RULEs are unchanged; the
+  scaffold mirrors are synced byte-identical, and a new structural
+  pin test (TestQuestionToolPresentationContractGates) enforces
+  the shared contract fragments, the per-gate option inventories,
+  and the per-command gate counts (8/6/8).
+  (Spec: openspec/changes/question-tool-presentation-contract/)
+  (Docs: #853, unbound-force/website#339)
+- update-run-pipeline-plan: `/uf.run-pipeline-plan` now executes
+  each work item through two `uf_delegate_command` delegations
+  (`/uf.unleash`, then `/uf.finale`) instead of three `general`
+  subagents running `/opsx-propose` -> `/uf.unleash` ->
+  `/uf.finale` — the child `/uf.unleash` session resolves the
+  issue, routes the tier, and runs the entry command itself.
+  The orphaned Gate Relay Protocol (`GATE:<name>` structured
+  values, `task_id` resumption, the "subagents MUST NOT invoke
+  the question tool" rule — implemented by no command) is
+  removed: human gates inside delegated commands surface
+  as tool-rendered paused exits relayed verbatim
+  (question-tool prompts inside a parented child do
+  not surface; the delegation wedges at the gate until
+  timeout, recovered by clearing the gate on the
+  branch or an orchestrator re-anchor), and the
+  orchestrator's `question` use is limited to Phase 0
+  triage and pause-relay decisions. Paused exits are now
+  modeled: any `/uf.unleash paused at:` heading (eleven known
+  variants) is relayed verbatim, the todowrite entry is
+  annotated `[BLOCKED: <variant>]`, and a pause-relay question
+  offers re-run / skip / abort; hard delegation failures route
+  through the same protocol. The disk handoff table now checks
+  the feature branch before `/uf.finale` and the PR plus clean
+  return to `main` after. The `/uf.finale` description
+  refreshes to nine steps (including sync-with-base), the
+  explicit-staging guardrail re-anchors to verification-only
+  (staging happens inside the finale child via
+  `uf_finale_stage`), the Closes linkage becomes a
+  verification backstop (`gh pr view` / `gh pr edit`) threaded
+  natively via `originating_issue`, and tracking requires
+  `gh pr checks` green before `[x]` with a non-green-CI relay
+  protocol. Scaffold mirror under
+  `internal/scaffold/assets/opencode/commands/` synced
+  byte-identically (enforced by drift-detection tests).
+  (Spec: openspec/changes/update-run-pipeline-plan/)
+  (Docs: #838, unbound-force/website#332)
+- spawn-subtask-classification-params: The `/uf.unleash` Swarm
+  parallel path's spawn call now carries the delegation
+  classification contract as tool parameters. The implement
+  step's parallel-execution spawn call block passes
+  `task_classification` and, for deterministic tasks, the
+  verified `skill` reference or `skill_absent_reason` to
+  `replicator_forge_spawn_subtask` in a fenced call block
+  mirroring the `uf_delegate_command` call blocks, forwards
+  any returned `skill_directive` verbatim, and names the
+  fail-closed behavior the tool enforces before the subtask
+  spawns (input validation on a missing classification or on
+  skill fields in a judgment-classified call,
+  `SKILL_REFERENCE_REQUIRED`, `SKILL_NOT_FOUND`). The
+  description-carrier prose and the "no classification
+  parameters" sentence are deleted: both were false since
+  unbound-force/replicator#143 shipped the parameter
+  contract on the spawn tool, and the prose-only spawn calls
+  failed the deployed tool's required `task_classification`
+  input validation, breaking the Swarm parallel path; the
+  parameterized template stays forward-compatible with older
+  replicator binaries (Go's `json.Unmarshal` ignores unknown
+  fields). Scaffold mirror
+  `internal/scaffold/assets/opencode/commands/uf.unleash.md`
+  synced byte-identically. Governance wording corrected to
+  the same carrier: DE-008's Swarm-path clause in
+  `.opencode/uf/packs/determinism.md` now binds Swarm-path
+  `[P]` delegations to pass the classification and reference
+  as spawn-tool parameters (pack bumped 1.3.0 -> 1.4.0; rule
+  strengthened, MUST/CRITICAL mapping unchanged), the Guard
+  reviewer's Deterministic Delegation Discipline checklist
+  (`.opencode/agents/divisor-guard.md` + scaffold mirror)
+  audits spawn call parameters instead of subtask prompt
+  prose, and the determinism-first skill's Swarm-path
+  guidance and Related Enforcement entries name both
+  delegation tools' contracts. Pin tests in
+  `internal/scaffold/scaffold_test.go` assert the parameters
+  are present and the stale sentence absent in both the
+  canonical command and its mirror. (Spec:
+  openspec/changes/spawn-subtask-classification-params/,
+  Fixes: #830, Refs: unbound-force/replicator#143)
+- unleash-build-test-fix-loop: /uf.unleash no longer halts for a
+  human when a blocking gate reports a failing check. The quick-tier
+  pre-flight gate, the per-phase checkpoint, and Step 6's pre-flight
+  soft gate (branch-caused or unknown failures) now classify every
+  failure by causality at gate entry, then run a build/test
+  fix loop for change-caused or unknown-origin failures: up to
+  3 iterations (a durable budget recorded in the gate's checkpoint
+  data, spanning sessions across resumes) of delegating the
+  diagnosis and repair to cobalt-crush-dev via prompt-only
+  uf_delegate_command (task_classification declared per call), then
+  deterministically re-running the exact pre-flight commands in the
+  calling gate's mode and re-classifying remaining failures.
+  A phase checkpoint whose loop succeeds re-records its verdict as
+  green (superseding the failed record); the quick gate records
+  quick-pre-flight; Step 6 proceeds to its dispatch. Pre-existing
+  and environmental failures never enter the loop; the gate treats
+  them as green and records them in the checkpoint inventory. Each
+  gate still exits through its unchanged format_unleash_exit
+  variant once change-caused checks persist past the budget's
+  3 total iterations, and the guardrails exit list now reads
+  "build/test failures that persist after the fix loop's
+  3 iterations". Scaffold pins cover the loop in both the command
+  and its mirrored scaffold asset. (Spec:
+  openspec/changes/unleash-build-test-fix-loop/, Docs: #819,
+  unbound-force/website#322)
+- spec-review-per-finding-gate: Replaced the bulk spec auto-fix
+  consent gate and the HIGH/CRITICAL dead-stop in spec review
+  with a per-finding decision gate. Each REQUEST CHANGES finding
+  is presented one at a time in severity order (CRITICAL, HIGH,
+  MEDIUM, LOW) as session text with per-option reasoning and a
+  recommendation, followed by a question tool offering "Apply
+  suggested fix" (any severity -- a human-directed consented
+  edit), "Override & continue" (justification recorded in
+  checkpoint data and the final report), "Show more context",
+  "Pause & exit" (routes through the tool-rendered spec-review
+  exit), and "Apply all remaining LOW/MEDIUM fixes" (bulk
+  shortcut, LOW/MEDIUM only). The pipeline cannot proceed past a
+  HIGH/CRITICAL finding without an explicit per-finding human
+  choice; the autonomous auto-fix boundary stays LOW/MEDIUM-only
+  (severity.md gains a clarifying note); the 3-iteration
+  re-review cap, session-resume guard, and override recording
+  are retained. The spec-review exit reason string now reads
+  "Unresolved spec review findings (pause or iteration cap)".
+  Applies to `/uf.unleash` Step 4 and `/uf.review-council` Spec
+  Review Mode; scaffold mirrors and structural tests updated in
+  lockstep.
+  (Spec: openspec/changes/spec-review-per-finding-gate/, Fixes: #777)
+- ts-plugin-coverage-gate: Raised the statements coverage
+  floor for the `.opencode/` TypeScript plugin suite from 90
+  to 94 percent in `.opencode/vitest.config.ts`; enforced by
+  the existing `plugin-test` / `make check` / Local CI
+  `plugin-tests` chain; resolves the coverage-gate deferral
+  tracked by #780. (Spec:
+  openspec/changes/ts-plugin-coverage-gate/, Closes: #780)
+- unleash-pipeline-hardening: Hardened the `/uf.unleash`
+  pipeline against the failure modes surfaced by the
+  fullsend field audit. Delegation: `resolveHostModel` is
+  variant-optional and throws the new
+  `StructuralHostModelError`; `uf_delegate_command`
+  classifies host-resolution failures as structural
+  (non-retryable, with remediation) or transient
+  (retryable) instead of failing opaquely. Review diffs:
+  new shared core `.opencode/lib/review-diff.ts` plus a
+  `capture_review_diff` tool (review-dispatch plugin)
+  replaces prose diff-capture in the template's spec and
+  code review steps — bounded, fail-closed, with
+  uncommitted-local and divergence fallbacks — verified
+  per DE-007 (registration surface, golden output shape,
+  real-repo round-trip). Tier routing: route decisions
+  validate tier entry-command existence
+  (`ROUTE_TIER_TOOLING`, `TIER_ENTRY_COMMANDS`) and stop
+  through the new `tier-routing-dirty-tree` and
+  `tier-routing-missing-tooling` exit variants; review
+  planning stops through the new `planner-failure` exit
+  variant fed by enriched plan errors (missing
+  reviewer-manifest entries now carry remediation, and
+  stale manifest entries emit LOW drift advisories).
+  Template: session-resume re-anchoring through
+  `get_progress`/`parse_tasks`, phase-scoped
+  `implement-phase-<N>` checkpoint records with failure
+  inventory classification, mechanical-task tool-reference
+  guidance, registered `replicator_forge_*` tool names,
+  and a single `write_unleash_summary` registration (the
+  redundant `persist_unleash_summary` alias registration
+  removed; factory retained). Scaffold mirrors synced for
+  every changed source including the new
+  `opencode/lib/review-diff.ts` asset, with the asset
+  inventories and the `TestRunInit_FreshDir` derived
+  range ([70-74]) updated to match.
+  (Spec: openspec/changes/unleash-pipeline-hardening/)
+- clarification-marker-superset: Single-sourced the
+  superset clarification-marker grammar: one shared
+  `CLARIFICATION_MARKER_PATTERN` is consumed by
+  `scan_clarifications`, `resolve_clarification`, and
+  the `uf_unleash_detect_resume` clarify probe — the
+  divergent dual-constant grammar (colon-only extractor
+  pattern plus bare-substring `CLARIFICATION_MARKER_PREFIX`
+  probe) is gone. The grammar accepts three forms —
+  colon (`[NEEDS CLARIFICATION: q]`, scoped), bare with
+  text (`[NEEDS CLARIFICATION text]`, unscoped), and
+  completely bare (`[NEEDS CLARIFICATION]`) — bare and
+  empty forms extract as unscoped questions whose text
+  falls back to the raw marker text, so a hand-written
+  bare marker resolves instead of wedging clarify
+  (detector firing while the extractor returns nothing).
+  The completely-bare and empty-colon fallback forms
+  leave a self-matching Clarifications log mention;
+  terminate by removing the literal marker syntax from
+  that log entry. Pluralized (`[NEEDS CLARIFICATIONS]`) and unterminated
+  marker-like text no longer holds clarify open; the
+  probe now derives from the grammar per line,
+  replacing the substring match. Command prose, lib doc
+  comments, and scaffold mirrors updated. Includes the
+  declared dependency update (design D7):
+  `@opencode-ai/plugin` 1.4.10 → 1.19.0 in
+  `.opencode/package.json` and `package-lock.json`,
+  maintainer-directed — the gatekeeping exception's
+  justification condition is unsatisfied, so the update
+  is declared for the review council to judge.
+  Pin-enforcement gates moved to the new pin: scaffold
+  manifest mirrors, exact-version test constants,
+  rollback baseline lock SHA256, the SC-FR-003
+  "Reproducible Plugin Dependencies" spec record
+  (specs/scaffold/spec.md delta), and the AGENTS.md
+  Technology Stack pin. Nine transitive packages
+  refreshed and two new transitives (`@ai-sdk/provider`
+  3.0.8, `json-schema` 0.4.0); the `toml`/`uuid`
+  security overrides hold; npm audit reports zero
+  known vulnerabilities. Node engine floor recorded:
+  `ini@7.0.0` requires ^22.22.2 || ^24.15.0 ||
+  >=26.0.0, and CI's node-version: 22 resolves to
+  v22.23.3, which satisfies it. The manifests are
+  scaffold assets deployed via `uf init`, so the bump
+  is changelog-relevant for scaffold consumers. (Spec:
+  openspec/changes/clarification-marker-superset/,
+  Refs: #743)
+- address-feedback-model-normalization: `/uf.address-feedback`
+  Phase 4.2 (Commit Changes) now instructs agents to call the
+  existing tested `normalize_model_name` MCP tool with their
+  raw model identifier and use the returned `normalized` value,
+  replacing the inline 6-step model-name normalization prose;
+  the warn-user fallback on `unknown-model` is preserved
+  verbatim and the scaffold mirror was synced byte-identical.
+  Command markdown only; no tool behavior change. Increment 2
+  of the deterministic-instruction migration (Principle VI). (Spec:
+  openspec/changes/address-feedback-model-normalization/,
+  Fixes: #709)
+- dispatch-finalize-determinism: Review dispatch finalization is
+  now deterministic and single-call. `consolidate_dispatch`
+  internally finalizes when given provenance `{branch, commit,
+  workflow_id}` and returns the authoritative review-verdict v2
+  projection; run-level `workflow_verdict` values are projected
+  kind-native (triage: VALID/INVALID/NEEDS-CLARIFICATION;
+  feedback: ACCEPT/AUTHOR-DECIDES) instead of generic council
+  verdicts. `/uf.triage-issue` §4.6, `/uf.review-council` §5,
+  and `/uf.address-feedback` §2.3.8 now make exactly one
+  `consolidate_dispatch` call per finalization attempt —
+  manual payload assembly and direct `finalize_review_dispatch`
+  calls are prohibited. Failures classify deterministically
+  (default-deny; only validation-stage rejections retry, at
+  most twice) and fail closed to INCONCLUSIVE. Also fixes the
+  `gh api --slurp` + `--jq` incompatibility in `/uf.triage-issue`
+  comment fetching and adds a deterministic duplicate-search
+  fallback. (Spec:
+  openspec/changes/dispatch-finalize-determinism/, Docs: #717,
+  Fixes: #712)
+- move-schemas-to-uf: Scaffold schema assets relocated from
+  `schemas/` to `uf/schemas/`. The `schemas/` prefix no longer
+  has a dedicated mapping in `mapAssetPath`; schemas/ paths now
+  use the default pass-through branch. (Spec:
+  openspec/changes/move-schemas-to-uf/, Fixes: #649)
+- command-prose-pilot: Rewrote `/uf.run-pipeline-plan`
+  (both the `.opencode/commands/` copy and its
+  byte-identical scaffold mirror) to a new house prose
+  standard for agent instruction files: ten canonical
+  control verbs (STOP, EXIT, PROCEED, RELAY, RESUME,
+  SKIP, DELEGATE, ANNOUNCE, ASK, VERIFY) with a ban
+  list, reference by name, one numbering axis, a
+  20-word procedural sentence limit, decision tables
+  for branching, and the Action/On-failure/Next step
+  template. Behavioral contract preserved (three-
+  subagent pipeline, gate relay, disk handoff
+  verification, guardrails, tracking); three documented
+  prose defects corrected: the "Step 8 (code review)"
+  cross-command reference, the Gate Relay STOP collision
+  (now RELAY), and the session-resume guard recast as a
+  precondition. Before/after static metrics and
+  comprehension A/B evidence recorded in the change's
+  metrics.md. No CI gate added (conformance validated
+  with change-time rg checks). (Spec:
+  openspec/changes/command-prose-pilot/)
 
 ### Fixed
+- fix-init-speckit-sentinel: `uf init` no longer silently skips
+  the Speckit delegation on a fresh run. Since the
+  starter-constitution asset landed (an embedded
+  `.specify/memory/constitution.md`), the file-walk phase
+  created `.specify/` before `initSubTools()` ran, which
+  satisfied the bare `.specify` sentinel and suppressed
+  `specify init` entirely -- every fresh non-`--force` `uf init`
+  produced a constitution-only `.specify/` with none of the
+  Speckit framework (scripts, templates, workflows, upstream
+  speckit commands). The sentinel now detects a real install
+  (`.specify/scripts`), the invocation runs
+  `specify init --here --integration opencode --offline --force`
+  (exactly one `--force`; specify 1.1.0 merges into non-empty
+  targets and preserves user-owned files such as the starter
+  constitution), and already-installed tooling renders a
+  visible "already configured" line in the sub-tool summary
+  instead of a silent skip. Users who want a constitution-only
+  `.specify/` can set `setup.tools.specify.method: skip`.
+  Regression coverage: `TestRun_SpecifyDelegationOnFreshInit`
+  (full `scaffold.Run()`, the level where the original test gap
+  hid the bug) and `TestSimpleToolsSentinelsNotScaffolded`
+  (mechanical guard that no embedded asset ever maps under a
+  sub-tool sentinel).
+  (Spec: openspec/changes/fix-init-speckit-sentinel/,
+  Docs: #827, unbound-force/website#325)
+- fix-push-state-catch-to-zero: uf_finale_push_state no longer
+  swallows rev-list count failures into zeroed ahead/behind
+  counts (issue #821); counting failures and unparseable output
+  now return a retryable PUSH_SYNC_COUNT envelope mirroring
+  BASE_SYNC_COUNT, /uf.finale step 5 treats it as a soft gate
+  with a safe push mode, and shared parsing moved to a tested
+  parseRevCount helper. Scaffold mirrors updated byte-identically.
+- fix-review-dispatch-correlation-release: `dispatch_review_runs`
+  now mints a fresh correlation ID per invocation instead of
+  binding one correlation ID per opencode conversation for the
+  process lifetime, so consecutive review-dispatch workflows
+  from the same conversation (spec review then code review in
+  `/uf.unleash`, per-item dispatches in `/uf.address-feedback`,
+  consecutive `/uf.triage-issue` or `/uf.review-pr` runs) no
+  longer clobber each other's dispatch-session state: each
+  invocation gets its own session directory, and prior
+  sessions survive as audit trail instead of being
+  overwritten. The tool's output now reports the invocation's
+  `correlation_id` on every post-validation return path
+  (success, all-skip, prompt-failure, budget-exhausted),
+  making each dispatch session addressable by explicit ID.
+  `consolidate_dispatch` and `dispatch_status` without an
+  explicit `correlation_id` resolve the latest dispatch
+  session; an explicit `correlation_id` retrieves an earlier
+  session's payload. Direct `dispatch_agent_run` fan-out
+  behavior is unchanged (one session per fan-out; a direct
+  call after an aggregate dispatch joins the latest aggregate
+  session). Fixes the root cause of #760 and #746. Regression
+  tests cover the lifecycle in `dispatch-review-runs.test.ts`,
+  `consolidate-dispatch.test.ts`, `dispatch-status.test.ts`,
+  and `dispatch-agent-run.test.ts`, with shared fixtures in
+  `.opencode/test/helpers/aggregate-dispatch-fixtures.ts`;
+  scaffold mirror synced
+  byte-identical. (Spec:
+  openspec/changes/fix-review-dispatch-correlation-release/,
+  Fixes: #794, Docs: #808, unbound-force/website#319)
+- address-feedback-diff-path-input: `/uf.address-feedback` §2.3.4
+  (`dispatch_review_runs` inputs) now documents the required
+  `diff_path` input — path to the saved immutable diff file —
+  and describes `changed_files` as a pre-formatted list of
+  changed file paths, matching `/uf.review-council` §2 and the
+  review-dispatch plugin schema (both are required strings for
+  every non-triage mode, feedback included). The template
+  previously omitted `diff_path` entirely and described
+  `changed_files` as the signal's sorted affected-file objects,
+  so an agent following it failed its first feedback-mode
+  `dispatch_review_runs` call with an input-validation error
+  and had to self-diagnose from plugin source; the golden
+  feedback-variant comment in
+  `.opencode/test/dispatch-review-runs.test.ts` now enumerates
+  the corrected documented-input list. Command markdown only;
+  no tool behavior change. The adjacent counts-only
+  output-shape claim is corrected separately as PR #761
+  feedback item 1 (issue #735) and is untouched here. Scaffold
+  mirror
+  `internal/scaffold/assets/opencode/commands/uf.address-feedback.md`
+  synced byte-identical. (Fixes: #763)
+- address-feedback-diff-path-producer: `/uf.address-feedback` §1.4
+  "Fetch and Save the PR Diff" (new; former §1.4-§1.6 renumbered
+  §1.5-§1.7) gives the §2.3.4 `diff_path` input (documented by
+  address-feedback-diff-path-input) its producing step: one
+  intent-level call to the existing registered
+  `fetch_pr_review_context` tool (review-dispatch plugin) with the PR
+  number; the returned `diff_path` is the immutable diff reused for
+  every Tier 2 dispatch. Fetch failures report the tool's structured
+  error envelope verbatim and STOP (`rate_limited` / `timeout` /
+  `api_error`); oversized diffs surface at dispatch time as the
+  structured `prompt_size_exceeded` error rather than a command-text
+  size pre-check (determinism pack DE-001/DE-005). Hard-coded
+  uf.address-feedback.md line-number site labels in
+  `.opencode/test/golden-output-shape.test.ts` and
+  `.opencode/test/dispatch-review-runs.test.ts` recomputed from the
+  final template. Command markdown only, referencing an existing
+  registered tool; no tool behavior change. Scaffold mirror
+  `internal/scaffold/assets/opencode/commands/uf.address-feedback.md`
+  synced byte-identical. (Refs: #811)
+- fix-dispatch-verdict-derivation: `consolidate_dispatch` now
+  derives `workflow_result.value` and `verdict` from
+  `calculatedWorkflowValue` — the same vote-based derivation
+  function the finalizer validates with — instead of the
+  severity ladder over consolidated findings, so emission and
+  validation share one derivation and cannot disagree. Fixes
+  deterministic finalization rejection of feedback split
+  panels (any successful zero-findings ACCEPT run plus
+  findings-bearing runs), triage split-majority panels, and
+  zero-successful-runs panels: those panel shapes previously
+  could never finalize — rejected with identical value-mismatch
+  errors that burned the bounded mechanical-retry budget and
+  fail-closed INCONCLUSIVE with no persisted artifact (observed
+  on PR #761). `verdict_reason` and advisories remain
+  severity-derived; council and test-review outputs are
+  unchanged (both derivations agree there). Four regression
+  tests added in `.opencode/test/consolidate-dispatch.test.ts`;
+  scaffold mirror
+  `internal/scaffold/assets/opencode/plugins/review-dispatch/index.ts`
+  synced byte-identical. (Spec:
+  openspec/changes/fix-dispatch-verdict-derivation/,
+  Fixes: #764)
+- fix-review-dispatch-recovery: Review-dispatch sessions can no
+  longer be bricked by a failed child run's accepted submissions:
+  `consolidate_dispatch` now scopes its finalization payload to
+  successful runs, excluding orphaned findings and proposals with
+  machine-readable `orphaned_submissions_excluded` warnings
+  (agent, run id, counts), and a reviewer run that aborts
+  mid-final-response after submitting (child message error) is
+  reclassified as a success run with a `post_submission_abort`
+  audit record so its submissions count. `consolidate_dispatch`
+  and `dispatch_status` accept an optional explicit
+  `correlation_id` (recovery from a fresh session after a
+  restart) and `dispatch_status` reports per-run token usage; run
+  prompts are persisted and session metadata refreshed on
+  re-dispatch, enabling reliable fix-loop re-runs. Two new
+  recovery tools in the review-dispatch plugin:
+  `discard_orphaned_submissions(correlation_id, agents?)` empties
+  orphaned submissions from failed runs with an audit block
+  (refuses successful runs), and
+  `redispatch_failed_runs(correlation_id, agents?, timeout?)`
+  re-runs failed reviewers from their original prompts and plan
+  entries, archiving prior run files under `superseded/` (a re-run
+  that exits before execution restores the prior run file to its
+  active path, keeping the session consolidatable).
+  Fail-closed semantics preserved: zero-success dispatches still
+  finalize INCONCLUSIVE; finalizer validation unchanged.
+  consolidate_dispatch results now always carry top-level
+  warnings/proposals observability fields on the no-provenance
+  path; callers forwarding to the external
+  finalize_review_dispatch tool must strip them (documented in
+  the tool description). (Spec:
+  openspec/changes/fix-review-dispatch-recovery/, Fixes: #751)
+- fix-tool-args-schema-mismatch: uf-workflow (8) and uf-finale
+  (3) tool factories now declare parameters via the
+  SDK-recognized zod `args` contract instead of plain
+  `parameters:` objects that @opencode-ai/plugin silently
+  ignored, restoring model-visible schemas and runtime
+  argument passing for 11 tools (checkpoint,
+  get_progress, clear_progress, normalize_model_name,
+  git_fetch, git_push, git_merge, git_rebase,
+  uf_finale_commit_context, uf_finale_create_pr,
+  uf_finale_ci_poll). Names, types, optionality, and
+  descriptions preserved exactly; execute bodies, result
+  envelopes, and runtime validation guards untouched
+  (defense-in-depth). Adds 12 schema-exposure regression
+  tests (sorted-args key equality, including
+  persist_unleash_summary as a future-regression guard)
+  and byte-identical scaffold mirrors. (Spec:
+  openspec/changes/fix-tool-args-schema-mismatch/,
+  Refs: #732, Docs: #740, unbound-force/website#310)
+- fix-tui-git-output-leak: Removed all 50 console.log/console.error
+  calls per tree (100 total across `.opencode/plugins/` and the
+  embedded `internal/scaffold/assets/opencode/` mirrors) from
+  uf-workflow and uf-finale plugin tool handlers. Tool output now
+  flows exclusively through JSON result envelopes, fixing TUI
+  alternate-screen corruption caused by plugin handlers writing
+  to the shared terminal. `uf_finale_stage` success envelope
+  enriched with `files: string[]` (staged file list, previously
+  TUI-only); ci_poll 30-second progress messages removed. Adds
+  spy-based zero-terminal-writes regression tests for every
+  handler plus files-field unit tests. (Spec:
+  openspec/changes/fix-tui-git-output-leak/, Docs: #710,
+  unbound-force/website#306)
+- fix-stale-base-ref: New `resolve_base_ref` tool in uf-workflow
+  plugin with three-level fallback (`upstream/main` → `origin/main`
+  → `main`) replaces hardcoded `main` ref in review-council local
+  path. Prevents phantom files in diffs when local `main` is stale.
+  Also removes token-wasting Key Files Changed block from
+  uf.unleash demo output. (Spec:
+  openspec/changes/fix-stale-base-ref/, Closes: #687)
+
+### Added
+- fetch-pr-review-context: New `fetch_pr_review_context` tool in
+  the review-dispatch plugin. Fetches all PR metadata needed for
+  review dispatch in one deterministic call: PR metadata, CI
+  checks, diff (persisted to disk with 0o600 permissions), existing
+  reviews, inline comments, and pre-computed derived fields. Uses
+  Bun.spawn with argument arrays for shell injection resistance.
+  (Spec: openspec/changes/fetch-pr-review-context/, Docs: #696)
+- uf-workflow-scaffold: New `uf-workflow` plugin scaffold with
+  `ToolSuccess<T>`, `ToolFailure`, `ToolResult<T>` result envelope
+  types and `success()`/`failure()` helper functions. Includes plugin
+  entry point, canonical scaffold copies, opencode.json registration,
+  activation gating, and vitest test harness. (Spec:
+  openspec/changes/uf-workflow-scaffold/, Closes: #682)
+- tier-gated-agent-count: Review dispatch now enforces tier-based
+  agent count caps. Lightweight diffs cap at 2 agents by default;
+  standard and heavy remain uncapped. Always-required agents
+  survive caps via floor enforcement. A HIGH severity advisory
+  warns when a custom heavy cap is applied to security-sensitive
+  diffs. The `--full` flag bypasses all caps. Caps are
+  configurable via `limits.tier_caps` in the review matrix.
+  (Spec: openspec/changes/tier-gated-agent-count/, Closes: #654)
+- optional-profile-models: Review matrix profile `model` fields
+  are now optional — profiles without a model fall back to host
+  model resolution at invocation time. Added
+  `.uf/review-matrix.override.yaml` for per-developer model and
+  variant customization with a whitelist constraint (only
+  `profiles.<tier>.[model, variant]` paths permitted). Bumped
+  review-matrix schema to version 3. (Spec:
+  openspec/changes/optional-profile-models/, Fixes: #636)
+- issue-pr-traceability: OpenSpec changes now support an
+  optional `originating_issue` field in `.openspec.yaml`.
+  `/uf.finale` reads the field and emits `Closes #<N>`
+  after `## Summary` in the PR body when present. Absence
+  of the field is backward compatible (no `Closes` line
+  emitted). (Spec: openspec/changes/issue-pr-traceability/,
+  Closes: #554)
+- uf-init-protect-block: `/uf.init` slash command and scaffold asset
+  now wrap core instructions in `<protect>` blocks to prevent
+  context-compaction-induced instruction loss. Updated insertion
+  logic to respect existing `<protect>` blocks in target files.
+  (Spec: openspec/changes/uf-init-protect-block/, Closes: #540)
+- run-pipeline-plan: New `/uf.run-pipeline-plan` slash command
+  that orchestrates a prioritized work plan through the full
+  Unbound Force pipeline (`/opsx-propose` → `/uf.unleash` →
+  `/uf.finale`) with fresh subagent isolation per phase,
+  human gate relay, and per-item progress tracking. Supports
+  plan file and GitHub issue-ref input modes. (Spec:
+  openspec/changes/run-plan-command/)
+
+### Fixed
+- content-portability-guardrails: Add Content Portability
+  rules (CP-001, CP-002, CP-003) to the default convention
+  pack and targeted guardrails in four issue-generating
+  components (triage child issues, tasks-to-issues command,
+  uf.init taskstoissues template, divisor-curator agent).
+  Prevents LLM-generated issue content from using
+  org-config-specific terminology for non-org-config repos.
+  (Spec: openspec/changes/content-portability-guardrails/,
+  Fixes: #593)
+- devcontainer-forward-ports: Podman sandbox commands
+  (`uf sandbox create`, `uf sandbox start`) now automatically
+  read `forwardPorts` from `.devcontainer/devcontainer.json`
+  and publish them via `-p` flags. Supports numeric ports,
+  `"host:container"` string mappings, and JSONC comments/
+  trailing commas. `uf sandbox create` (persistent path)
+  deduplicates against both `DefaultServerPort` and
+  `--demo-ports`; `uf sandbox start` (ephemeral path)
+  deduplicates against `DefaultServerPort`. (Fixes: #595)
 - fix-sandbox-persistent-workdir: `buildPersistentRunArgs()`
   now sets `--workdir` and `WORKSPACE` env var for persistent
   Podman workspaces. OpenCode starts in the project directory
@@ -34,6 +1028,14 @@ Each entry follows the format: `- <change-name>: <summary>`.
   Fixes: #479)
 
 ### Changed
+- constitution-v1.3.0-gatekeeping: Aligned AGENTS.md
+  gatekeeping rule with constitution v1.3.0 language
+  (amended in prior PR #607). Gatekeeping Integrity now
+  permits narrowly scoped dependency pin updates with
+  immutable SHA verification, gate preservation, rollback
+  documentation, and reproducible validation. Explicitly
+  prohibits mutable tags and other name-addressed refs.
+  (Fixes: #610)
 - add-todowrite-to-pipelines: Pipeline commands
   (/uf.unleash, /uf.finale, /uf.review-council,
   /uf.address-feedback) now use TodoWrite for live
@@ -114,6 +1116,34 @@ Each entry follows the format: `- <change-name>: <summary>`.
   Fixes: #428)
 
 ### Added
+- review-council-multi-model-fanout: Replace single-host
+  Divisor delegation with explicit-first multi-model fan-out
+  via two OpenCode plugins registered in `opencode.json`
+  (`.opencode/plugins/invoke-agent` and `review-dispatch`)
+  driven by a closed reviewer manifest
+  (`.uf/reviewer-capabilities.yaml`) and an explicit-first
+  hybrid matrix (`.uf/review-matrix.yaml`). Adds bounded
+  sibling-repository evidence (`.uf/sibling-repos.yaml`),
+  source-grounded lesson-proposal provenance, staged
+  reproducible plugin activation in `uf init`, `uf doctor`
+  review-plugin checks, a new scope-based Go coverage gate
+  (`internal/coveragegate`, `cmd/coverage-gate`,
+  `coverage-gate.json`), and `make plugin-test` and
+  `make coverage-gate` targets (both wired into `make check`
+  and `ci_local.yml`). Emits a Hero Interface Contract
+  review-dispatch envelope and versions the canonical
+  review-verdict artifact to 2.0.0 with native
+  `INCONCLUSIVE` and `UNAVAILABLE` decisions.
+  (Spec: openspec/changes/review-council-multi-model-fanout/,
+  Fixes: #635)
+- uf-init-stealth-mode: `uf init` gains a `--stealth` flag for
+  local-only scaffolding that leaves the working tree git-clean
+  and tracked files (`.gitignore`, `AGENTS.md`) unmodified. Uses
+  `.git/info/exclude` for exclusion, snapshots and restores all
+  tracked files (bytes and mode/permission bits), and provides a
+  `--check` flag for verifying git-cleanliness without writing.
+  (Spec: openspec/changes/uf-init-stealth-mode/, Fixes: #638,
+  Website issue: unbound-force/website#292)
 - add-speckit-ref-assertion-test: Add red-first
   content-assertion test `TestSpeckitTemplates_RequiredReferences`
   (internal/scaffold) that verifies Step 6 of the embedded
@@ -228,6 +1258,9 @@ Each entry follows the format: `- <change-name>: <summary>`.
   Demo now includes a JIT re-read guard ensuring
   prescribed Next Steps output is reproduced verbatim
   from the template, not improvised after compression.
+  Step 6 spec review exits now provide tier-aware
+  recovery guidance, directing OpenSpec users to update
+  change artifacts instead of running Speckit commands.
   Reconciles divergent Next Steps blocks into one
   canonical format. Adds anti-improvisation guardrail
   and Step 8 equivalence note (review council already
@@ -484,6 +1517,40 @@ Each entry follows the format: `- <change-name>: <summary>`.
   in `.uf/config.yaml` — skipped tools are excluded from
   initialization entirely, even when the binary is on PATH.
   (Spec: openspec/changes/parallel-subtool-init/)
+- fix-triage-issue-dispatch-docs: Corrected the dispatch
+  data-flow documentation across the four dispatch-driving
+  commands. `/uf.triage-issue` §2.3/§2.4 (and the mirrored
+  §4/§5 sections in `/uf.review-council`, §2.3.7/§2.3.8 in
+  `/uf.address-feedback`, §5a in `/uf.review-pr`) now
+  document the counts-only `dispatch_review_runs` output
+  contract, the single sanctioned no-provenance
+  `consolidate_dispatch` retrieval (side-effect-free; the
+  exact same payload feeds proposal storage, verdict
+  resolution, and finalization), the validated
+  `{agent, information, tag, category}` proposal shape
+  (there is no `reference` field), the dual-mode
+  exactly-once scoping, and FR-001 transient/permanent/all-
+  skip failure behavior. `/uf.triage-issue` §3.1 verdict
+  resolution now names run-recorded `workflow_verdict` as
+  the governing vote source and sources assessment fields
+  (category, objectivity, reasoning, split recommendations)
+  exclusively from the new additive `read_assessment_fields`
+  review-dispatch plugin tool (+257 lines, +36 tests, bounds:
+  128/64/4096 chars, 16x512 split entries; DE-001
+  extraction), which reads persisted child text from the
+  dispatch store with tool-owned untrusted-input validation.
+  Adopted the maintainer-approved `@opencode-ai/plugin`
+  1.4.10 -> 1.19.0 pin with its full lockstep set (manifests
+  + scaffold mirrors, test expectations, provenance/
+  rollback testdata, Node engine range (^22.22.2 ||
+  ^24.15.0 || >=26.0.0) declared in `engines` fields,
+  AGENTS.md/README documentation) as
+  dedicated commit 02b593e2, separate from the command-doc
+  and plugin-tool commits. `make check` green (924 plugin
+  tests, coverage 94.62%/87.2%). Supersedes the repo-wide
+  1.4.10 pin from review-council-multi-model-fanout.
+  (Spec: openspec/changes/fix-triage-issue-dispatch-docs/,
+  Fixes: #735)
 
 ### Fixed
 - `uf setup` DevPod now falls back to binary download from GitHub

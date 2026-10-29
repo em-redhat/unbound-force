@@ -10,8 +10,6 @@ package schemas
 
 import (
 	"github.com/unbound-force/unbound-force/internal/artifacts"
-	"github.com/unbound-force/unbound-force/internal/metrics"
-	"github.com/unbound-force/unbound-force/internal/orchestration"
 )
 
 // --- Envelope Schema ---
@@ -41,32 +39,6 @@ type ContextSchema struct {
 }
 
 // --- Type aliases for existing structs ---
-
-// MetricsSnapshotPayload aliases the existing metrics.MetricsSnapshot
-// struct. The existing struct already has json tags suitable for
-// schema generation.
-type MetricsSnapshotPayload = metrics.MetricsSnapshot
-
-// CycleTimeStatsPayload aliases the existing metrics.CycleTimeStats.
-type CycleTimeStatsPayload = metrics.CycleTimeStats
-
-// BacklogHealthPayload aliases the existing metrics.BacklogHealth.
-type BacklogHealthPayload = metrics.BacklogHealth
-
-// HealthIndicatorPayload aliases the existing metrics.HealthIndicator.
-type HealthIndicatorPayload = metrics.HealthIndicator
-
-// WorkflowRecordPayload aliases the existing orchestration.WorkflowRecord.
-type WorkflowRecordPayload = orchestration.WorkflowRecord
-
-// WorkflowStagePayload aliases the existing orchestration.WorkflowStage.
-type WorkflowStagePayload = orchestration.WorkflowStage
-
-// DecisionPayload aliases the existing orchestration.Decision.
-type DecisionPayload = orchestration.Decision
-
-// AcceptanceDecisionPayload aliases the existing artifacts.AcceptanceDecision.
-type AcceptanceDecisionPayload = artifacts.AcceptanceDecision
 
 // ArtifactContextPayload aliases the existing artifacts.ArtifactContext.
 type ArtifactContextPayload = artifacts.ArtifactContext
@@ -115,8 +87,8 @@ type QualityRecommendation struct {
 	Target      string `json:"target" jsonschema:"description=Target function or package"`
 }
 
-// ReviewVerdictPayload defines the payload for review-verdict
-// artifacts produced by The Divisor.
+// ReviewVerdictPayload defines the historical version 1 payload for
+// review-verdict artifacts produced by The Divisor.
 type ReviewVerdictPayload struct {
 	PersonaVerdicts    []PersonaVerdict `json:"persona_verdicts" jsonschema:"description=Individual persona review verdicts"`
 	CouncilDecision    string           `json:"council_decision" jsonschema:"description=Overall council decision (APPROVED/CHANGES_REQUESTED/ESCALATED)"`
@@ -124,6 +96,38 @@ type ReviewVerdictPayload struct {
 	UnresolvedFindings []ReviewFinding  `json:"unresolved_findings,omitempty" jsonschema:"description=Findings not yet addressed"`
 	PRUrl              string           `json:"pr_url" jsonschema:"description=Pull request URL"`
 	ConventionPackUsed string           `json:"convention_pack_used" jsonschema:"description=Convention pack ID used for review"`
+}
+
+// ReviewVerdictDecision is a canonical version 2 council decision.
+type ReviewVerdictDecision = artifacts.ReviewVerdictDecision
+
+const (
+	// ReviewVerdictSchemaVersionV1 identifies historical review verdicts.
+	ReviewVerdictSchemaVersionV1 = artifacts.ReviewVerdictSchemaVersionV1
+	// ReviewVerdictSchemaVersionV2 identifies current review verdicts.
+	ReviewVerdictSchemaVersionV2 = artifacts.ReviewVerdictSchemaVersionV2
+
+	// ReviewVerdictApproved permits downstream automated progression.
+	ReviewVerdictApproved = artifacts.ReviewVerdictApproved
+	// ReviewVerdictChangesRequested blocks progression on review findings.
+	ReviewVerdictChangesRequested = artifacts.ReviewVerdictChangesRequested
+	// ReviewVerdictEscalated blocks progression pending human resolution.
+	ReviewVerdictEscalated = artifacts.ReviewVerdictEscalated
+	// ReviewVerdictInconclusive blocks progression when no result was calculated.
+	ReviewVerdictInconclusive = artifacts.ReviewVerdictInconclusive
+	// ReviewVerdictUnavailable blocks progression when assessment was unavailable.
+	ReviewVerdictUnavailable = artifacts.ReviewVerdictUnavailable
+)
+
+// ReviewVerdictV2Payload defines the current version 2 review-verdict
+// payload. Version 1 remains a separate historical read model.
+type ReviewVerdictV2Payload struct {
+	PersonaVerdicts    []PersonaVerdict      `json:"persona_verdicts"`
+	CouncilDecision    ReviewVerdictDecision `json:"council_decision"`
+	IterationCount     int                   `json:"iteration_count"`
+	UnresolvedFindings []ReviewFinding       `json:"unresolved_findings,omitempty"`
+	PRUrl              string                `json:"pr_url"`
+	ConventionPackUsed string                `json:"convention_pack_used"`
 }
 
 // PersonaVerdict represents a single reviewer persona's assessment.
@@ -143,66 +147,4 @@ type ReviewFinding struct {
 	Line        int    `json:"line,omitempty" jsonschema:"description=Affected line number"`
 }
 
-// BacklogItemPayload defines the payload for backlog-item artifacts
-// produced by Muti-Mind. Uses json tags (not yaml) because this
-// represents the JSON artifact payload, not the Markdown frontmatter.
-type BacklogItemPayload struct {
-	ID                 string                `json:"id" jsonschema:"description=Backlog item identifier (e.g. BI-001)"`
-	Title              string                `json:"title" jsonschema:"description=Item title"`
-	Description        string                `json:"description,omitempty" jsonschema:"description=Detailed description"`
-	Type               string                `json:"type" jsonschema:"description=Item type (feature/bug/chore/spike)"`
-	Priority           string                `json:"priority" jsonschema:"description=Priority level (P1/P2/P3)"`
-	Status             string                `json:"status" jsonschema:"description=Current status (backlog/ready/in-progress/done)"`
-	AcceptanceCriteria []AcceptanceCriterion `json:"acceptance_criteria" jsonschema:"description=Acceptance criteria in Given/When/Then format"`
-	Sprint             string                `json:"sprint,omitempty" jsonschema:"description=Assigned sprint"`
-	EffortEstimate     string                `json:"effort_estimate,omitempty" jsonschema:"description=Effort estimate"`
-	Dependencies       []string              `json:"dependencies,omitempty" jsonschema:"description=Dependent backlog item IDs"`
-	RelatedSpecs       []string              `json:"related_specs,omitempty" jsonschema:"description=Related specification IDs"`
-}
 
-// AcceptanceCriterion represents a single Given/When/Then scenario.
-type AcceptanceCriterion struct {
-	Given string `json:"given" jsonschema:"description=Precondition"`
-	When  string `json:"when" jsonschema:"description=Action"`
-	Then  string `json:"then" jsonschema:"description=Expected outcome"`
-}
-
-// CoachingRecordPayload defines the payload for coaching-record
-// artifacts produced by Mx F. Supports both retrospective and
-// coaching interaction record types.
-type CoachingRecordPayload struct {
-	RecordType          string               `json:"record_type" jsonschema:"description=Record type (retrospective or coaching)"`
-	Retrospective       *RetroPayload        `json:"retrospective,omitempty" jsonschema:"description=Retrospective session data"`
-	CoachingInteraction *CoachingInteraction `json:"coaching_interaction,omitempty" jsonschema:"description=Coaching interaction data"`
-}
-
-// RetroPayload represents retrospective session data within a
-// coaching record. Uses json tags for the artifact payload format
-// (the existing coaching.RetroRecord uses yaml tags for Markdown
-// frontmatter, so we define a separate struct for JSON output).
-type RetroPayload struct {
-	Date         string       `json:"date" jsonschema:"description=Retrospective date (YYYY-MM-DD)"`
-	Participants []string     `json:"participants,omitempty" jsonschema:"description=Session participants"`
-	Patterns     []string     `json:"patterns" jsonschema:"description=Identified patterns"`
-	RootCauses   []string     `json:"root_causes,omitempty" jsonschema:"description=Root causes identified"`
-	ActionItems  []ActionItem `json:"action_items" jsonschema:"description=Committed action items"`
-}
-
-// ActionItem represents a tracked improvement commitment in a
-// coaching record payload.
-type ActionItem struct {
-	ID          string `json:"id" jsonschema:"description=Action item identifier"`
-	Description string `json:"description" jsonschema:"description=Action item description"`
-	Owner       string `json:"owner" jsonschema:"description=Responsible person or hero"`
-	Deadline    string `json:"deadline" jsonschema:"description=Target completion date (YYYY-MM-DD)"`
-	Status      string `json:"status" jsonschema:"description=Status (pending/in-progress/completed/stale)"`
-}
-
-// CoachingInteraction records a coaching session within a coaching
-// record payload.
-type CoachingInteraction struct {
-	Topic     string   `json:"topic" jsonschema:"description=Coaching topic"`
-	Questions []string `json:"questions" jsonschema:"description=Questions asked during session"`
-	Insights  []string `json:"insights" jsonschema:"description=Insights surfaced"`
-	Outcome   string   `json:"outcome" jsonschema:"description=Session outcome (action_item/escalation/resolved/deferred)"`
-}

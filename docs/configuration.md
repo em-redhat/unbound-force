@@ -56,7 +56,7 @@ considered valid because compiled defaults are used.
 
 ## Configuration Sections
 
-The config file has seven top-level sections. Each section is
+The config file has six top-level sections. Each section is
 independent and can be included or omitted as needed.
 
 ---
@@ -164,6 +164,11 @@ sessions.
 | `uid_map` | bool | `false` | Enable UID mapping for rootless containers. |
 | `ide` | string | `none` | IDE for DevPod to open after workspace creation. |
 
+> **Note:** The Podman backend also reads `forwardPorts` from
+> `.devcontainer/devcontainer.json` and publishes those ports
+> automatically. Ports already listed in `demo_ports` or the
+> default server port (4096) are deduplicated.
+
 Valid values for `runtime`: `auto`, `podman`, `docker`.
 
 Valid values for `backend`: `auto`, `podman`, `devpod`.
@@ -257,42 +262,26 @@ embedding:
   host: http://localhost:11434
 ```
 
+## Review Council Configuration
+
+The review council is configured through four separate `.uf/` files,
+not through `.uf/config.yaml`. Each is a closed, schema-validated
+contract and is optional -- absent files fall back to compiled
+defaults.
+
+| File | Purpose |
+|------|---------|
+| `.uf/review-matrix.yaml` | Named model profiles and ordered per-mode, per-agent run arrays, plus `limits` (persona/run/timeout/cost). |
+| `.uf/review-matrix.override.yaml` | Per-developer model/variant overrides for specific profile tiers. Only `profiles.<tier>.[model, variant]` paths are permitted (whitelist). Gitignored — each developer maintains their own. |
+| `.uf/reviewer-capabilities.yaml` | Classifies each Divisor persona as review or content and declares its ordered review scopes. |
+| `.uf/sibling-repos.yaml` | Declares the sibling repositories eligible for bounded evidence acquisition. |
+
+Each file has a corresponding JSON Schema under `schemas/` (and a
+scaffold mirror under `internal/scaffold/assets/uf/schemas/`), so invalid
+values fail closed at load time rather than silently misrouting review
+fan-out.
+
 ---
-
-### workflow
-
-Controls the hero lifecycle workflow, defining which pipeline
-phases are executed by humans and which by the AI swarm.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `execution_modes` | map of string to string | (see below) | Per-phase execution mode. |
-| `spec_review` | bool | `false` | Enable spec review before implementation. |
-
-Default `execution_modes`:
-
-| Phase | Default Mode |
-|-------|-------------|
-| `define` | `human` |
-| `implement` | `swarm` |
-| `validate` | `swarm` |
-| `review` | `swarm` |
-| `accept` | `human` |
-| `reflect` | `swarm` |
-
-Valid values for each mode: `human`, `swarm`.
-
-```yaml
-workflow:
-  execution_modes:
-    define: human
-    implement: swarm
-    validate: swarm
-    review: swarm
-    accept: human
-    reflect: swarm
-  spec_review: true
-```
 
 ## Common Scenarios
 

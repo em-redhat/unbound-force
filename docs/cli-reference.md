@@ -1,8 +1,7 @@
 # CLI Reference
 
-Unbound Force ships two binaries: `uf` (the framework toolkit)
-and `mutimind` (the product owner backend). This document covers
-every command, flag, and subcommand for both.
+Unbound Force ships the `uf` CLI (the framework toolkit). This
+document covers every command, flag, and subcommand.
 
 ---
 
@@ -31,6 +30,8 @@ uf init [flags]
 | `--force` | bool | `false` | Overwrite all existing files |
 | `--divisor` | bool | `false` | Deploy only Divisor review agents and convention packs |
 | `--lang` | string | `""` | Project language for convention pack (auto-detected from go.mod, package.json, etc. if omitted) |
+| `--stealth` | bool | `false` | Scaffold locally without modifying tracked files or dirtying git (local-only; hidden files are not preserved on re-clone, re-run `uf init --stealth` to restore) |
+| `--check` | bool | `false` | Verify git-cleanliness without writing (requires `--stealth`) |
 
 > **Note:** Dewey indexing during init uses `--no-embeddings` for
 > fast metadata-only indexing. Run `dewey index` separately to
@@ -70,6 +71,13 @@ Diagnose the Unbound Force development environment. Checks for
 required tools, version managers, scaffolded files, hero
 availability, Replicator status, MCP server configuration,
 and agent/skill integrity.
+
+When the `replicator` binary is present, its version is checked
+against a v0.7.0 floor: at or above the floor the check Passes
+with the detected version, while a below-floor install Warns
+(never Fails) with a `brew upgrade unbound-force/tap/replicator`
+upgrade hint. Version-command failures fail open to a "version
+could not be verified" warning.
 
 Exit code 0 when all checks pass or only warnings exist.
 Exit code 1 when any check fails.
@@ -224,6 +232,14 @@ uf sandbox create [flags]
 | `--demo-ports` | int slice | `nil` | Additional ports to expose for demos (comma-separated, e.g., `3000,8080`) |
 | `--ide` | string | `"none"` | IDE for DevPod to open: `none`, `vscode`, `openvscode`, `fleet`, `jupyternotebook`, `cursor` |
 
+> **Automatic port forwarding:** When using the Podman backend,
+> `uf sandbox create` and `uf sandbox start` automatically read
+> `forwardPorts` from `.devcontainer/devcontainer.json` and
+> publish those ports via `-p` flags. Ports already covered by
+> `DefaultServerPort` (4096) or `--demo-ports` are deduplicated.
+> Both numeric (`8080`) and string (`"8080:3000"`) entries are
+> supported, and JSONC comments in the file are tolerated.
+
 **Example**
 
 ```bash
@@ -282,6 +298,11 @@ uf sandbox start [flags]
 | `--no-parent` | bool | `false` | Mount only the project directory (disable parent directory mount) |
 | `--uidmap` | bool | `false` | Use explicit UID/GID mapping (for macOS when Podman machine virtiofs does not support `--userns=keep-id`) |
 | `--ide` | string | `"none"` | IDE for DevPod to open: `none`, `vscode`, `openvscode`, `fleet`, `jupyternotebook`, `cursor` |
+
+> **Note:** Ports listed in `forwardPorts` in
+> `.devcontainer/devcontainer.json` are also published
+> automatically. See [Automatic port forwarding](#uf-sandbox-create)
+> above for details.
 
 **Example**
 
@@ -496,254 +517,4 @@ uf config validate
 
 # Validate with JSON output (CI-friendly)
 uf config validate --format json
-```
-
----
-
-## mutimind
-
-`mutimind` is the Muti-Mind product owner backend CLI for backlog
-management and GitHub issue synchronization. It stores backlog
-items as YAML files under `.uf/muti-mind/backlog/` and produces
-JSON artifacts under `.uf/muti-mind/artifacts/`.
-
-### Global Flags
-
-These flags apply to all `mutimind` subcommands:
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--format` | string | `"text"` | Output format: `text` or `json` |
-| `--backlog-dir` | string | `".uf/muti-mind/backlog"` | Backlog directory |
-| `--artifacts-dir` | string | `".uf/muti-mind/artifacts"` | Artifacts directory |
-
-### mutimind init
-
-Initialize the Muti-Mind environment. Creates the backlog and
-artifacts directories and writes a default `config.yaml` if one
-does not exist.
-
-```
-mutimind init
-```
-
-No command-specific flags.
-
-**Example**
-
-```bash
-mutimind init
-```
-
-### mutimind add
-
-Add a new backlog item. Assigns the next available ID
-automatically.
-
-```
-mutimind add [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--type` | string | `""` | Item type: `epic`, `story`, `task`, or `bug` (required) |
-| `--title` | string | `""` | Item title (required) |
-| `--priority` | string | `"P3"` | Priority: `P1` through `P5` |
-| `--description` | string | `""` | Item description |
-
-**Example**
-
-```bash
-# Add a high-priority story
-mutimind add --type story --title "User authentication" --priority P1
-
-# Add a bug with description
-mutimind add --type bug --title "Login timeout" \
-  --description "Session expires after 30 seconds"
-```
-
-### mutimind list
-
-List backlog items with optional filtering.
-
-```
-mutimind list [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--status` | string | `""` | Filter by status |
-| `--sprint` | string | `""` | Filter by sprint |
-
-**Example**
-
-```bash
-# List all items
-mutimind list
-
-# List only in-progress items
-mutimind list --status in-progress
-
-# List items in a specific sprint, as JSON
-mutimind list --sprint sprint-3 --format json
-```
-
-### mutimind update
-
-Update fields on an existing backlog item.
-
-```
-mutimind update <id> [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--priority` | string | `""` | New priority |
-| `--status` | string | `""` | New status |
-| `--sprint` | string | `""` | New sprint |
-
-**Example**
-
-```bash
-# Move an item to in-progress
-mutimind update BLI-003 --status in-progress
-
-# Reprioritize and assign to a sprint
-mutimind update BLI-003 --priority P1 --sprint sprint-2
-```
-
-### mutimind show
-
-Show full details of a backlog item.
-
-```
-mutimind show <id>
-```
-
-No command-specific flags (respects the global `--format` flag).
-
-**Example**
-
-```bash
-# Human-readable output
-mutimind show BLI-003
-
-# JSON output
-mutimind show BLI-003 --format json
-```
-
-### mutimind sync-push
-
-Push local backlog items to GitHub Issues. If an item ID is
-provided, pushes only that item. Otherwise, pushes all items
-that need syncing.
-
-```
-mutimind sync-push [id]
-```
-
-No command-specific flags.
-
-**Example**
-
-```bash
-# Push all items
-mutimind sync-push
-
-# Push a specific item
-mutimind sync-push BLI-003
-```
-
-### mutimind sync-pull
-
-Pull GitHub Issues into the local backlog. Creates local backlog
-items for issues that do not yet have a corresponding local entry.
-
-```
-mutimind sync-pull
-```
-
-No command-specific flags.
-
-### mutimind sync-status
-
-Report on the synchronization state between local backlog items
-and GitHub Issues.
-
-```
-mutimind sync-status
-```
-
-No command-specific flags.
-
-### mutimind sync
-
-Perform a bidirectional sync including conflict detection. Pushes
-local changes and pulls remote changes, reporting any conflicts.
-
-```
-mutimind sync
-```
-
-No command-specific flags.
-
-### mutimind sync-project
-
-Sync backlog items with GitHub Projects.
-
-```
-mutimind sync-project
-```
-
-No command-specific flags.
-
-### mutimind generate-artifact
-
-Generate a JSON artifact envelope for a backlog item. The artifact
-is written to the artifacts directory.
-
-```
-mutimind generate-artifact <item_id>
-```
-
-No command-specific flags.
-
-**Example**
-
-```bash
-mutimind generate-artifact BLI-003
-```
-
-### mutimind decide
-
-Generate an acceptance-decision artifact for a backlog item.
-Records whether the item is accepted, rejected, or conditionally
-accepted, along with the rationale and criteria evaluation.
-
-```
-mutimind decide [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--item` | string | `""` | Backlog item ID (required) |
-| `--decision` | string | `""` | Decision: `accept`, `reject`, or `conditional` (required) |
-| `--rationale` | string | `""` | Rationale for the decision |
-| `--report-ref` | string | `""` | Gaze report reference |
-| `--met` | string slice | `nil` | Acceptance criteria met (comma-separated) |
-| `--failed` | string slice | `nil` | Acceptance criteria failed (comma-separated) |
-
-**Example**
-
-```bash
-# Accept an item with rationale
-mutimind decide --item BLI-003 --decision accept \
-  --rationale "All acceptance criteria verified by Gaze" \
-  --report-ref ".uf/artifacts/quality-report/BLI-003.json" \
-  --met "AC-1,AC-2,AC-3"
-
-# Conditionally accept with failed criteria
-mutimind decide --item BLI-005 --decision conditional \
-  --rationale "Coverage below threshold" \
-  --met "AC-1,AC-2" --failed "AC-3"
 ```

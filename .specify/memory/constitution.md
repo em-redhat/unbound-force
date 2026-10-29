@@ -1,36 +1,54 @@
 <!--
   SYNC IMPACT REPORT
   ==================
-  Version change: 1.1.0 → 1.2.0 (MINOR: new principle added)
+  Version change: 1.3.1 → 1.4.0 (MINOR: new principle, Deterministic Execution)
 
-  Added principles:
-    - V. Security by Default
+  Added or expanded guidance:
+    - New Principle VI "Deterministic Execution" — agent context is
+      a scarce shared resource; deterministic procedures MUST
+      execute in tools with tests rather than be re-reasoned from
+      prose.
 
   Unchanged principles:
     - I. Autonomous Collaboration
     - II. Composability First
     - III. Observable Quality
     - IV. Testability
+    - V. Security by Default
+
+  Changed sections:
+    - Core Principles — Principle VI "Deterministic Execution"
+      added after Principle V, covering executable tools with
+      tests, tool-rendered prescribed output, preserved
+      decision-point examples, and measurable efficiency deltas.
+    - Hero Constitution Alignment — stale count reference
+      reconciled ("five org principles" -> "six org
+      principles").
 
   Unchanged sections:
-    - Hero Constitution Alignment
     - Development Workflow
-    - Governance
+    - Governance amendment and versioning procedures
 
   Templates requiring updates:
     ✅ .specify/templates/plan-template.md — no changes needed;
        Constitution Check section is generic and will align at
-       plan time using these five principles.
+       plan time using these six principles.
     ✅ .specify/templates/spec-template.md — no changes needed.
     ✅ .specify/templates/tasks-template.md — no changes needed.
     ✅ .specify/templates/checklist-template.md — no changes needed.
     ✅ .specify/templates/agent-file-template.md — no changes needed.
 
   Hero constitution alignment:
-    ✅ Gaze v1.1.0 — Testability principle already matches.
-    ⚠  Gaze v1.1.0 — Will need Principle V alignment review.
-    ⚠  Website v1.0.0 — Will need Testability + Principle V
-       alignment review.
+    ⚠  All hero repositories — review alignment with the new
+       Principle VI MUST rules and open an alignment issue within
+       one release cycle, resolving it before the next major
+       version.
+
+  Migration:
+    - None required — no existing principle is altered or removed.
+    - Principle VI governs new and modified instruction text in
+      commands, agents, and skills; existing templates are cleaned
+      up opportunistically at review time.
 -->
 
 # Unbound Force Constitution
@@ -79,7 +97,7 @@ value without introducing mandatory dependencies.
   require patching or forking another hero to integrate.
 - When two or more heroes are deployed together, their combination
   MUST produce value greater than the sum of their individual
-  capabilities (e.g., Gaze quality reports informing Mx F metrics).
+  capabilities (e.g., Gaze quality reports informing review verdicts).
   This additive value MUST NOT come at the cost of standalone
   functionality.
 - Heroes SHOULD auto-detect the presence of other heroes and
@@ -115,11 +133,10 @@ automated, reproducible evidence.
   without bespoke parsing.
 
 **Rationale**: A swarm that cannot measure its own performance
-cannot improve. Machine-parseable output enables Mx F to track
-trends, Muti-Mind to make data-driven prioritization decisions,
-and The Divisor to ground reviews in evidence rather than opinion.
-Provenance metadata ensures that every data point is traceable to
-its source, preventing "trust me" assertions.
+cannot improve. Machine-parseable output enables heroes to make
+data-driven decisions and ground reviews in evidence rather than
+opinion. Provenance metadata ensures that every data point is
+traceable to its source, preventing "trust me" assertions.
 
 ### IV. Testability
 
@@ -179,6 +196,36 @@ privilege boundaries are enforced before code reaches review — not
 discovered during review when anchoring bias and finding fragmentation
 can cause under-classification.
 
+### VI. Deterministic Execution
+
+Agent context is a scarce shared resource. Deterministic procedures
+MUST execute in tools rather than be re-reasoned from prose.
+Judgment — decisions, evaluation, human interaction — belongs in
+instruction prose.
+
+- **Executable tools with tests**: Mechanical procedures added to
+  commands, agents, or skills — parsing, existence checks, git
+  choreography, output template rendering, enumeration loops — MUST
+  be extracted to executable tools that ship with tests.
+- **Tool-rendered prescribed output**: Prescribed terminal output
+  MUST be rendered by tools, not reconstructed from instructed
+  templates. Behavioral guards such as re-read rules and emit-time
+  verification are interim mitigations, not the mechanism of record.
+- **Preserved decision-point examples**: When instruction is
+  extracted to a tool, one or two tool output-format examples
+  SHOULD be preserved near the decision points that consume them.
+- **Measurable efficiency claims**: Change records SHOULD include
+  measurable line or token deltas when instruction text changes, so
+  efficiency claims rest on evidence rather than assertion.
+
+**Rationale**: Behavioral guards mitigate the symptoms of prompt
+drift but cannot cure the cause — prescribed procedures and output
+formats living as prose in conversation content. Tool-rendered
+output cannot drift after context compression, and extraction saves
+tokens while eliminating re-reasoning errors. Without codification
+the practice regresses with every new command template and leaves
+reviewers no rule to cite.
+
 ## Hero Constitution Alignment
 
 Every hero repository MUST maintain its own constitution in
@@ -188,7 +235,7 @@ org constitution — they MUST NOT contradict any org principle.
 - Hero constitutions MUST include a `parent_constitution` reference
   indicating which version of the Unbound Force org constitution
   they align with.
-- Hero constitutions MAY add principles beyond the five org
+- Hero constitutions MAY add principles beyond the six org
   principles, provided the additional principles do not contradict
   any org-level MUST rule.
 - When the org constitution is amended, all hero constitutions MUST
@@ -223,9 +270,16 @@ org constitution — they MUST NOT contradict any org principle.
   to: coverage thresholds, severity definitions, MUST/SHOULD rule
   classifications, CI flags (`-race`, `-count=1`), review iteration
   limits, agent temperature and tool-access settings, and pinned
-  dependency versions. When an implementation cannot meet a gate,
-  the agent MUST report the failure and stop rather than weakening
-  the gate.
+  dependency versions. An agent MAY update a pinned dependency only
+  when all of the following conditions are met: the update addresses
+  a documented security or CI reliability fix; the target immutable
+  commit SHA is verified against the upstream release or source; all
+  existing security and quality gates remain enforced; a rollback path
+  to the previous SHA is documented; reproducible validation evidence
+  is provided; and normal review and CI approval are completed. Pins
+  MUST NOT be changed to mutable tags or other name-addressed refs.
+  Agents MUST report and stop when any condition is missing or when a
+  change would weaken, bypass, or disable a gate.
 - **Phase Discipline**: Each pipeline phase (specify,
   clarify, plan, tasks, analyze, checklist, implement,
   review) MUST produce only its designated artifacts.
@@ -272,4 +326,4 @@ and project-specific guidance.
   implicit priority over another; resolution is context-dependent
   and requires written justification.
 
-**Version**: 1.2.0 | **Ratified**: 2026-02-25 | **Last Amended**: 2026-06-01
+**Version**: 1.4.0 | **Ratified**: 2026-02-25 | **Last Amended**: 2026-10-14

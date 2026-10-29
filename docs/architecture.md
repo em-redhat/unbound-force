@@ -27,8 +27,9 @@ severity levels and actionable recommendations.
 specification, not a blank editor. The system enforces
 a pipeline from requirements to implementation to
 review, preventing the "I built the wrong thing"
-problem. Two pipeline tiers handle everything from a
-quick bug fix to a multi-story feature.
+problem. Three pipeline tiers -- quick, OpenSpec, and Speckit --
+handle everything from a trivial fix to a multi-story feature,
+routed automatically by `/uf.unleash`.
 
 **Quality that only goes up.** CRAP scores, coverage
 ratchets, and side effect classification give you
@@ -154,22 +155,10 @@ from a different angle (security, architecture, testing,
 operations, intent drift, and more). Not a separate
 repository -- distributed through the `uf` binary.
 
-**Muti-Mind** -- The product owner agent. Manages
-backlogs, generates user stories, syncs with GitHub
-issues, and makes acceptance decisions. Exists as an
-embedded agent persona plus a separate `mutimind` CLI
-binary built from this repository.
-
 **Cobalt-Crush** -- The developer agent persona. Writes
 code following specs, convention packs, and engineering
 principles. Embedded in `uf init` as an agent file -- no
 separate binary.
-
-**Mx F** -- The manager agent. Facilitates retrospectives,
-tracks team metrics, coaches on process improvement, and
-removes impediments. Exists as an embedded coaching agent. The `mxf` CLI
-(unbound-force/mxf) is available separately but is not
-installed by `uf setup`.
 
 
 ## What `uf init` Does
@@ -204,15 +193,13 @@ by `uf init`, plus more from companion tools):
 Companion tools add their own commands during `uf init`:
 Speckit adds the `/speckit.*` pipeline commands, Gaze
 adds `/gaze` and `/gaze-fix`, Replicator adds `/forge`,
-`/forge-status`, `/handoff`, `/inbox`, and `/org`, and
-Muti-Mind adds the `/muti-mind.*` backlog commands.
+`/forge-status`, `/handoff`, `/inbox`, and `/org`.
 A full scaffold produces ~46 command files total.
 
-**Agent personas** (user-owned, 12 active agents):
+**Agent personas** (user-owned, 16 active agents):
 ```
 .opencode/agents/
-  cobalt-crush-dev.md     muti-mind-po.md
-  mx-f-coach.md           gaze-reporter.md
+  cobalt-crush-dev.md     gaze-reporter.md
   gaze-test-generator.md  divisor-guard.md
   divisor-architect.md    divisor-adversary.md
   divisor-sre.md          divisor-testing.md
@@ -235,6 +222,12 @@ for swarm and review operations.
   typescript-custom.md (user-owned, your TS extensions)
   content.md          (tool-owned, writing standards)
   content-custom.md   (user-owned, your content rules)
+  ci.md               (tool-owned, CI conventions)
+  ci-custom.md        (user-owned, your CI rules)
+  python.md           (tool-owned, Python conventions)
+  python-custom.md    (user-owned, your Python extensions)
+  review-voice.md     (tool-owned, review voice)
+  review-voice-custom.md (user-owned, your review voice rules)
 ```
 
 Tool-owned packs contain canonical rules. User-owned
@@ -350,11 +343,9 @@ ownership (destructive -- resets your customizations).
 
 | Hero | Role | What It Does Today | Where It Lives |
 |------|------|--------------------|----------------|
-| **Muti-Mind** | Product Owner | Backlog management, user story generation, GitHub issue sync, acceptance decisions | Embedded agent + `mutimind` CLI in this repo |
 | **Cobalt-Crush** | Developer | Spec-driven code implementation, convention pack adherence, test hook generation | Embedded agent in `uf init` |
 | **Gaze** | Tester | CRAP scores, coverage metrics, side effect classification, test generation (Go) | Separate repo: unbound-force/gaze |
 | **The Divisor** | Reviewer | 9-persona review council, auto-detected code vs spec mode, convention-based criteria | Embedded in `uf init` (9 agent files) |
-| **Mx F** | Manager | Retrospectives, coaching, metrics tracking, impediment removal | Embedded agent in `uf init` |
 
 See [docs/heroes.md](heroes.md) for full hero
 descriptions with current vs planned capabilities.
@@ -363,23 +354,23 @@ descriptions with current vs planned capabilities.
 ## Specification Pipelines
 
 All non-trivial changes follow a specification workflow
-before implementation begins. Two pipelines handle
-different scales of work.
+before implementation begins. Three tiers handle different
+scales of work, routed automatically by `/uf.unleash`.
 
 ### Decision: Which Pipeline?
 
 ```
-  How many user stories?
+  How big is the change?
          |
-    +----+----+
-    |         |
-  < 3       3+       Not sure?
-    |         |         |
-    v         v         v
-  OpenSpec  Speckit   Start with
-                      OpenSpec,
-                      escalate if
-                      scope grows
+  +------+------+--------------+
+  |             |              |
+Trivial      < 3 stories    3+ stories
+  |             |              |
+  v             v              v
+ Quick       OpenSpec        Speckit
+
+ Not sure? Run /uf.unleash with a change
+ description -- it routes automatically.
 ```
 
 ### Strategic Pipeline (Speckit)
@@ -412,7 +403,7 @@ Creates artifacts in `specs/NNN-feature-name/`.
 /uf.review-council     Run the Divisor review council
        |
        v
-/uf.finale             Commit, push, create PR, merge
+/uf.finale             Commit, sync with base, push, create PR
 ```
 
 ### Tactical Pipeline (OpenSpec)
@@ -431,7 +422,7 @@ user stories. Creates artifacts in
 /uf.review-council  Run the Divisor review council
        |
        v
-/uf.finale          Commit, push, create PR, merge
+/uf.finale          Commit, sync with base, push, create PR
 ```
 
 ### Autonomous Mode
@@ -442,10 +433,12 @@ user stories. Creates artifacts in
 
 Runs the full pipeline autonomously -- clarify, plan,
 tasks, spec review, implement, code review, and
-retrospective. Works with both Speckit (`NNN-*` branches)
-and OpenSpec (`opsx/*` branches). Exits to human judgment
-only when it encounters ambiguity, review failures, or
-merge conflicts.
+retrospective. Works with Speckit (`NNN-*` branches),
+OpenSpec (`opsx/*` branches), and the quick tier
+(`quick/*` branches); from `main` or an unrecognized
+branch it routes to the right tier automatically. Exits
+to human judgment only when it encounters ambiguity,
+review failures, or merge conflicts.
 
 
 ## The Knowledge Layer (Dewey)
@@ -541,6 +534,7 @@ enforce. Rules are tagged by severity:
 | `/uf.review-council` | Pre-PR (local) | Discovers available personas, runs them in parallel, produces APPROVE or REQUEST CHANGES |
 | `/uf.review-pr [N]` | Post-PR (GitHub) | Single agent reviews a specific PR, analyzes CI results |
 | `/uf.address-feedback [N]` | Post-PR (GitHub) | Triage + address reviewer feedback |
+| `/uf.rebase-pr [N]` | Post-PR (GitHub) | Rebases a conflicted PR's head branch onto its base and force-pushes with lease |
 
 ### Addressing Feedback
 
@@ -702,12 +696,18 @@ changes.
 - `typescript.md` -- TypeScript-specific conventions
 - `content.md` -- Writing and documentation standards
 - `severity.md` -- Finding severity definitions
+- `ci.md` -- CI conventions for GitHub Actions
+- `python.md` -- Python-specific conventions
+- `review-voice.md` -- Review output voice standards
 
 **User-owned** (never overwritten):
 - `default-custom.md` -- Your project-specific rules
 - `go-custom.md` -- Your Go extensions
 - `typescript-custom.md` -- Your TypeScript extensions
 - `content-custom.md` -- Your content extensions
+- `ci-custom.md` -- Your CI extensions
+- `python-custom.md` -- Your Python extensions
+- `review-voice-custom.md` -- Your review-voice extensions
 
 ### Who Consumes Them
 
@@ -738,13 +738,6 @@ without direct coordination.
     quality-report/    Gaze analysis output
     review-verdict/    Divisor review decisions
     feedback-triage/   Author response to review feedback
-    acceptance-decision/  Muti-Mind accept/reject
-  muti-mind/
-    backlog.yaml       Product backlog
-    stories/           Generated user stories
-  mx-f/
-    metrics/           Sprint and velocity data
-    coaching/          Coaching session records
 ```
 
 ### Artifact Envelope Format
@@ -795,7 +788,7 @@ Compiled defaults
 
 ### Config Sections
 
-The `.uf/config.yaml` file has 7 sections:
+The `.uf/config.yaml` file has 6 sections:
 
 | Section | Controls |
 |---------|----------|
@@ -805,7 +798,6 @@ The `.uf/config.yaml` file has 7 sections:
 | `sandbox` | Backend (podman/devpod), image, resources, mode |
 | `gateway` | Port, provider override |
 | `embedding` | Model name, dimensions (used by Dewey and Replicator) |
-| `workflow` | Workflow stage definitions and transitions |
 
 ### Getting Started with Config
 
